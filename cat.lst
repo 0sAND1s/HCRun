@@ -1,0 +1,1203 @@
+# file opened: D:\Spectrum\src\HC\HCCat\3\cat.ASM
+  1   0000              ;File listing program for HC
+  2   0000              ;George Chirtoaca, george.chirtoaca(@)gmail(.)com, March 2022
+  3   0000              ;
+  4   0000              ;The purpose of this program is to have a fast file listing, that includes hidden files and also shows the file size and file attributes using colours on screen.
+  5   0000              ;File selection will be possible with arrow keys, to select BASIC programs and run them, making it usefull as "run" program for auto-run on HC floppy disks. That's why it tries to be small and fast.
+  6   0000              ;Reading the exact file size and file type requires opening up each file, which is slow, so it's not performed. The aproximate file size provided (rounded at 128 bytes) can be used as a hint to guess the file type.
+  7   0000              ;Smaller files should be the BASIC loaders (around 256 bytes). SCREEN$ files are 7168 bytes. Larger files are code files usually. Files bigger than 64K are shown with file size in kilobytes.
+  8   0000              ;Can display up to 128 files (max supported by HC BASIC file system), grouped in up to 3 pages, 44 files per page. Most disks will have one page listing, quickly showing up all disk info on one screen.
+  9   0000              ;System calls are kept at minimum, because are slow. The aproximate file size is determined by processing all file dir entries and summing up the record count instead of calling the system call for file size determination.
+ 10   0000              ;Free space is determined by summing up file sizes on disk and substracting from maximum possible size (636KB). This allows showing up the ocupied space too, that the ROM doesn't list.
+ 11   0000              ;Another way to determine space would be to make the system call to get disk the allocation bitmap, but that bitmap is in "phantom RAM" (IF1 paged RAM) so it's more convoluted to read and process it (count set bits).
+ 12   0000              ;Would be probably faster to process the disk directory by reading the sectors and parsing manually, but that requires more code, and one objective was to have small and clear code. So system calls are used for Find First/Next.
+ 13   0000              ;Mathematical operations like multiplication and division are performed using bit shifts, since involve numbers that are power of 2. Again this is for having simple and small code.
+ 14   0000              ;Printing the text uses the BASIC ROM routine, that supports embedded color codes. The IF1 print routine doesn't support that. Direct screen output would be another way, but requires more code. Graphical output (64 columns) was excluded for the same reason.
+ 15   0000              ;ROM printing routing has an issue with line 21 (out of 0-23), so a trick is used to avoid scrolling: channel 0 is used for the stats printing, then lines 0-21 are printed on channel 2, also poking a variable to prevent scrolling.
+ 16   0000              ;What was used to develop this program:
+ 17   0000              ; - SjASMPlus v1.18.2 cross-assembler
+ 18   0000              ; - Crimson Editor for editing, launching assembler, deploying in emulator
+ 19   0000              ; - HC 2000 Emulator for Sinclair Spectrum +3 by Rares Atodiresei, for using the Spectaculator emulator with HC-2000 emulation support
+ 20   0000              ; - Spectaculator emulator, for using the debugger and it's other top quality features
+ 21   0000              ; - Fuse emulator, version from Alex Badea, with HC-2000 emulation support, for double testing
+ 22   0000              ; - HCDisk2 by myself, for creating/updating disk images for HC in DSK format.
+ 23   0000              ;
+ 24   0000              ;Motivation?
+ 25   0000              ; - I wanted to refresh my Z80 assembly language
+ 26   0000              ; - I wanted to create an usefull tool for HC computers, with features that don't exist yet
+ 27   0000              ; - I wanted to publish the code, in case it's usefull in understanding how HC computers disk system works
+ 28   0000              ;I realise some people may find it useless, but it's still a good exercise for myself and others.
+ 29   0000              ;
+ 30   0000              ;How it works:
+ 31   0000              ;1. Reads disk catalog and saves a line in a table for each file, with info from directory entry 0: file name, RC count.
+ 32   0000              ;2. Reads disk catalog again, to read the total record count for each file. This second pass is required because some files may have dir entry 1 show up before dir entry 0.
+ 33   0000              ;3. Calculates disk space used by files, based on cache table record count, rounding up to 2048 (block size).
+ 34   0000              ;4. Displays total used space on disk, file count, disk free space, listing page 1/2/3.
+ 35   0000              ;5. Displays file list and file size in bytes, rounded up at 128 (CPM style). File attributes are shown in color, as noted on screen: red=read only, magenta=system (hidden from CAT), yellow=read only + system.
+ 36   0000
+ 37   0000              				DEVICE ZXSPECTRUM48
+ 38   0000
+ 39   0000              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Main program ;;;;;;;;;;;;;;;;;;;;;;;;;;
+ 40   0000              	ORG START_ADDR
+ 41   8000
+ 42   8000              start:
+ 43   8000              	;Init IF1, disk, variables
+ 44   8000 CD 2A 80     	call Init
+ 45   8003              	;First read of catalog, to get file list
+ 46   8003 CD 4F 82     	call ReadCatalog1
+ 47   8006              	;Second read of catalog, to get file size
+ 48   8006 CD A3 82     	call ReadCatalog2
+ 49   8009              	;Calculate space used by files on disk
+ 50   8009 CD 93 80     	call GetDiskUsedSpace
+ 51   800C              	;Display list of files
+ 52   800C CD 01 81     	call DisplayFiles
+ 53   800F
+ 54   800F C9           	ret
+ 55   8010
+ 56   8010              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Char routines ;;;;;;;;;;;;;;;;;;;;;;;;;
+ 57   8010
+ 58   8010
+ 59   8010              ;Return read char in A
+ 60   8010              ReadChar:
+ 61   8010 CF           	rst 08
+ 62   8011 1B           	DEFB 27
+ 63   8012 C9           	ret
+ 64   8013
+ 65   8013              ;Print a string
+ 66   8013              ;HL=str. addr.
+ 67   8013              ;B=len
+ 68   8013              PrintStr:
+ 69   8013 7E           	ld a, (hl)
+ 70   8014 E5           	push hl
+ 71   8015 C5           	push bc
+ 72   8016 D7           		rst $10				;Print using ROM routine, since it supports color output. The IF1 print routine doesn't.
+ 73   8017 C1           	pop bc
+ 74   8018 E1           	pop hl
+ 75   8019 23           	inc hl
+ 76   801A 10 F7        	djnz PrintStr
+ 77   801C C9           	ret
+ 78   801D
+ 79   801D
+ 80   801D              ;Compare string at HL with the one at DE, max length B
+ 81   801D              ;IN: HL, DE = addr. of strings to compare, B = max. length of strings to compare
+ 82   801D              ;OUT: z flag, set = match, reset = mismatch
+ 83   801D              StrCmp:
+ 84   801D E5           	push hl
+ 85   801E D5           	push de
+ 86   801F              Compare:
+ 87   801F 1A           		ld a, (de)
+ 88   8020 BE           		cp (hl)
+ 89   8021 20 04        		jr nz, MisMatch
+ 90   8023 23           		inc hl
+ 91   8024 13           		inc de
+ 92   8025 10 F8        		djnz Compare
+ 93   8027              MisMatch:
+ 94   8027 D1           	pop de
+ 95   8028 E1           	pop hl
+ 96   8029 C9           	ret
+ 97   802A
+ 98   802A              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ 99   802A
+100   802A              Init:
+101   802A              ;These 3 calls are not needed when this program is launched from disk, as it will display the current disk.
+102   802A              ;If loaded from tape, it won't work without the 2 calls, since they are needed for DOS initialisation and selecting A: or B:.
+103   802A CD 42 80     	call InitVars
+104   802D CD 6C 80     	call InitDos
+105   8030 CD 70 80     	call SelectDisk
+106   8033
+107   8033 AF           	xor a
+108   8034 6F           	ld l, a
+109   8035 67           	ld h, a
+110   8036 22 06 84     	ld (UsedKB), hl					;reset used blocks
+111   8039 32 05 84     	ld (FileCnt), a					;reset file counter
+112   803C
+113   803C              	;CLS
+114   803C 3E 02        	ld  a, 2
+115   803E CD AF 0D     	call ROM_OPEN_SCR_CLR
+116   8041
+117   8041 C9           	ret
+118   8042
+119   8042              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Disk routines ;;;;;;;;;;;;;;;;;;;;;;;;;
+120   8042
+121   8042              ;Insert IF1 variables
+122   8042              InitVars:
+123   8042 CF           	rst 08
+124   8043 31           	DEFB 49
+125   8044 C9           	ret
+126   8045
+127   8045              ;Create a disk channel for BDOS access (does not open the file)
+128   8045              ;IN: HL=name addr, B=drive, C=name len
+129   8045              ;OUT: IX=FCB
+130   8045              CreateChannel:
+131   8045 22 DC 5C     	ld (FSTR1), hl
+132   8048 26 00        	ld h,0
+133   804A 68           	ld l,b
+134   804B 22 D6 5C     	ld (DSTR1), hl
+135   804E 69           	ld l,c
+136   804F 22 DA 5C     	ld (NSTR1), hl
+137   8052 CF           	rst 08
+138   8053 37           	DEFB 55
+139   8054 01 0C 00     	ld bc, CH_FCB			;adjust to get cp/m fcb
+140   8057 DD 09        	add ix, bc
+141   8059 C9           	ret
+142   805A
+143   805A
+144   805A              ;Destroy a BDOS channel
+145   805A              ;IN: IX=FCB
+146   805A              DestroyChannel:
+147   805A 01 F4 FF     	ld bc, -CH_FCB			;adjust to get the basic channel
+148   805D DD 09        	add ix, bc
+149   805F CF           	rst 08
+150   8060 38           	DEFB 56
+151   8061 C9           	ret
+152   8062
+153   8062
+154   8062              ;Generic BDOS call
+155   8062              ;IX=arg, A=function
+156   8062              BDOS:
+157   8062 DD 22 ED 5C  	ld (HD11), ix
+158   8066 32 EF 5C     	ld (COPIES), a
+159   8069 CF           	rst 08
+160   806A 39           	DEFB 57
+161   806B C9           	ret
+162   806C
+163   806C              InitDos:
+164   806C 3E 00        	ld	a, 0
+165   806E 18 F2        	jr	BDOS
+166   8070
+167   8070              SelectDisk:
+168   8070 3A 04 84     	ld  a, (DRIVE)
+169   8073 DD 26 00     	ld  ixh, 0
+170   8076 DD 6F        	ld	ixl, a	;0=A, 1=B
+171   8078 3E 01        	ld	a, 1	;1=Select disk
+172   807A 18 E6        	jr	BDOS
+173   807C
+174   807C
+175   807C              ;FindFirst
+176   807C              ;IX=fcb
+177   807C              FindFirst:
+178   807C 3E 04        	ld a, 4
+179   807E 18 E2        	jr BDOS
+180   8080
+181   8080
+182   8080              ;FindNext
+183   8080              ;IX=fcb
+184   8080              FindNext:
+185   8080 3E 05        	ld a, 5
+186   8082 18 DE        	jr BDOS
+187   8084
+188   8084
+189   8084              ;Set DMA address for BDOS into the already alocated (and unused) 256 bytes channel buffer
+190   8084              ;IX=fcb
+191   8084              SetDMA:
+192   8084 01 26 00     	ld bc, CH_DMA		;offset into alocated data area of the channel (256 bytes)
+193   8087 DD E5        	push ix
+194   8089 DD 09        		add ix, bc
+195   808B 3E 0D        		ld a, 13
+196   808D CD 62 80     		call BDOS
+197   8090 DD E1        	pop ix
+198   8092 C9           	ret
+199   8093
+200   8093
+201   8093              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+202   8093
+203   8093              ;Sum up file size on disk for all files. It's easier than parsing the block bitmap in phantom RAM.
+204   8093              GetDiskUsedSpace:
+205   8093 21 08 84     	ld		hl, Cache
+206   8096 3A 05 84     	ld		a, (FileCnt)
+207   8099 47           	ld		b, a
+208   809A
+209   809A              FileSizeLoop:
+210   809A C5           	push	bc
+211   809B 01 0B 00     		ld		bc, NAMELEN
+212   809E 09           		add		hl, bc
+213   809F
+214   809F 4E           		ld		c, (hl)
+215   80A0 23           		inc		hl
+216   80A1 46           		ld		b, (hl)
+217   80A2 23           		inc		hl
+218   80A3
+219   80A3 E5           		push	hl
+220   80A4 C5           			push	bc
+221   80A5 E1           			pop		hl
+222   80A6 CD B6 80     			call	GetFileSizeOnDiskKB
+223   80A9
+224   80A9 ED 4B 06 84  			ld		bc, (UsedKB)
+225   80AD 09           			add		hl, bc
+226   80AE 22 06 84     			ld		(UsedKB), hl
+227   80B1 E1           		pop		hl
+228   80B2 C1           	pop		bc
+229   80B3 10 E5        	djnz	FileSizeLoop
+230   80B5 C9           	ret
+231   80B6
+232   80B6
+233   80B6              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+234   80B6
+235   80B6              ;IN HL=RC count
+236   80B6              ;OUT HL = File size on disk in KB
+237   80B6              ;(RC count * 128) / 2048 = RC count * 16 = block count. Block count * 2 = KB on disk
+238   80B6              GetFileSizeOnDiskKB:
+239   80B6 AF           	xor a
+240   80B7
+241   80B7              	;/2
+242   80B7 CB 3C        	srl	h
+243   80B9 CB 1D        	rr	l
+244   80BB 17           	rla
+245   80BC              	;/4
+246   80BC CB 3C        	srl	h
+247   80BE CB 1D        	rr	l
+248   80C0 17           	rla
+249   80C1              	;/8
+250   80C1 CB 3C        	srl	h
+251   80C3 CB 1D        	rr	l
+252   80C5 17           	rla
+253   80C6              	;/16
+254   80C6 CB 3C        	srl	h
+255   80C8 CB 1D        	rr	l
+256   80CA 17           	rla
+257   80CB
+258   80CB B7           	or  a
+259   80CC 28 01        	jr  z, NoPartialAU
+260   80CE 23           	inc	hl
+261   80CF              NoPartialAU:
+262   80CF
+263   80CF              	;block count * 2 = KB
+264   80CF CB 25        	sla	l
+265   80D1 CB 14        	rl	h
+266   80D3 C9           	ret
+267   80D4
+268   80D4              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+269   80D4
+270   80D4              ;IN HL = RC count
+271   80D4              DisplayFileLength:
+272   80D4              	;check if RC >= $200 RC, to display size in KB then, as it doesn't fit in 16 bits.
+273   80D4 3E 02        	ld  a, 2
+274   80D6 94           	sub h
+275   80D7 38 16        	jr  c, BigFile
+276   80D9
+277   80D9              	;RC * 128 = size in bytes rounded at 128.
+278   80D9              	;h << 7
+279   80D9 CB 0C        	rrc h
+280   80DB              	;l >> 1
+281   80DB CB 3D        	srl l
+282   80DD              	;save carry	in H
+283   80DD CB 1C        	rr h
+284   80DF              	;save L
+285   80DF 7D           	ld  a, l
+286   80E0 2E 00        	ld  l, 0
+287   80E2              	;save bit 7 of L
+288   80E2 CB 14        	rl h
+289   80E4 CB 1D        	rr l
+290   80E6              	;save H + 7 bits of L
+291   80E6 B4           	or  h
+292   80E7 67           	ld  h, a
+293   80E8
+294   80E8 11 F4 83     	ld  de, FileLen
+295   80EB CD 4B 83     	call N2ASCII5
+296   80EE
+297   80EE C9           	ret
+298   80EF
+299   80EF              BigFile:
+300   80EF CD B6 80     	call GetFileSizeOnDiskKB
+301   80F2
+302   80F2 11 F4 83     	ld  de, FileLen
+303   80F5 CD 41 83     	call N2ASCII3
+304   80F8 13           	inc  de
+305   80F9 3E 4B        	ld  a, 'K'
+306   80FB 12           	ld  (de), a
+307   80FC 13           	inc de
+308   80FD 3E 42        	ld  a, 'B'
+309   80FF 12           	ld  (de), a
+310   8100
+311   8100 C9           	ret
+312   8101
+313   8101              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+314   8101              DisplayFiles:
+315   8101 3E 31        	ld  a, '1'
+316   8103 32 94 83     	ld  (ScrPageMsg), a
+317   8106 32 96 83     	ld  (ScrPageMsgMax), a
+318   8109
+319   8109 3A 05 84     	ld a, (FileCnt)
+320   810C B7           	or a
+321   810D 20 07        	jr  nz, NonEmptyDisk
+322   810F CD 10 83     	call DisplayStats
+323   8112 CD 10 80     	call ReadChar
+324   8115 C9           	ret
+325   8116
+326   8116              NonEmptyDisk:
+327   8116              	;detemine how many file list pages we have (1-3)
+328   8116 21 96 83     	ld hl, ScrPageMsgMax
+329   8119              ScreenCntLoop:
+330   8119 D6 2C        	sub MAX_FILES_SCR
+331   811B 34           	inc (hl)
+332   811C 30 FB        	jr  nc, ScreenCntLoop
+333   811E 35           	dec (hl)
+334   811F
+335   811F              DisplayFilesLoop:
+336   811F AF           	xor a
+337   8120 32 DF 83     	ld (TabChar), a
+338   8123
+339   8123 32 E4 83     	ld (DisplayedBright), a
+340   8126
+341   8126 CD 5C 81     	call GetFileListForScreen
+342   8129 CD B6 81     	call DisplayOneScreen
+343   812C
+344   812C              ReadCharLoop:
+345   812C CD 10 80     	call ReadChar
+346   812F FE 07        	cp  KEY_ESC
+347   8131 C8           	ret z
+348   8132 FE 0A        	cp  KEY_DOWN
+349   8134 28 0E        	jr  z, NextScr
+350   8136 FE 0B        	cp  KEY_UP
+351   8138 28 17        	jr  z, PrevScr
+352   813A FE 09        	cp  KEY_RIGHT
+353   813C 28 06        	jr  z, NextScr
+354   813E FE 08        	cp  KEY_LEFT
+355   8140 28 0F        	jr  z, PrevScr
+356   8142 18 E8        	jr  ReadCharLoop
+357   8144
+358   8144              NextScr:
+359   8144 21 94 83     	ld hl, ScrPageMsg
+360   8147 3A 96 83     	ld a, (ScrPageMsgMax)
+361   814A 34           	inc (hl)
+362   814B BE           	cp (hl)
+363   814C 30 D1        	jr  nc,DisplayFilesLoop
+364   814E 77           	ld (hl), a
+365   814F 18 DB        	jr  ReadCharLoop
+366   8151
+367   8151              PrevScr:
+368   8151 21 94 83     	ld hl, ScrPageMsg
+369   8154 3E 31        	ld  a, '1'
+370   8156 BE           	cp (hl)
+371   8157 28 D3        	jr  z, ReadCharLoop
+372   8159 35           	dec (hl)
+373   815A 18 C3        	jr  DisplayFilesLoop
+374   815C
+375   815C
+376   815C              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+377   815C              ;Determine the cache line to start with (in HL) and how many files to show (in B)
+378   815C              ;page1 = files 1-44, page2 = files 45 - 88, page3 = 89 - 128
+379   815C              GetFileListForScreen:
+380   815C 3A 05 84     	ld  a, (FileCnt)
+381   815F 4F           	ld  c, a
+382   8160 3A 94 83     	ld  a, (ScrPageMsg)
+383   8163 5F           	ld  e, a
+384   8164 3A 96 83     	ld a, (ScrPageMsgMax)
+385   8167 FE 31        	cp '1'
+386   8169 28 08        	jr  z, OneScreenMax
+387   816B FE 32        	cp '2'
+388   816D 28 08        	jr  z, TwoScreensMax
+389   816F FE 33        	cp '3'
+390   8171 28 17        	jr  z, ThreeScreensMax
+391   8173
+392   8173              ;determine file list offset for file list on screen and file count for
+393   8173              OneScreenMax:
+394   8173 06 00        	ld  b, 0
+395   8175 18 30        	jr 	FindCacheLine
+396   8177              TwoScreensMax:
+397   8177 7B           	ld  a, e
+398   8178 FE 32        	cp  '2'
+399   817A 28 06        	jr  z, Page2of2
+400   817C              Page1of2:
+401   817C 06 00        	ld  b, 0					;start from first file for page 1
+402   817E 0E 2C        	ld  c, MAX_FILES_SCR		;display full screen of files, more to come
+403   8180 18 25        	jr  FindCacheLine
+404   8182              Page2of2:
+405   8182 06 2C        	ld  b, MAX_FILES_SCR		;skip first page of files for page 2
+406   8184 79           	ld  a, c
+407   8185 D6 2C        	sub MAX_FILES_SCR
+408   8187 4F           	ld  c, a					;get rest of files for page 2
+409   8188 18 1D        	jr 	FindCacheLine
+410   818A              ThreeScreensMax:
+411   818A 7B           	ld  a, e
+412   818B FE 33        	cp  '3'
+413   818D 28 10        	jr  z, Page3of3
+414   818F FE 32        	cp  '2'
+415   8191 28 06        	jr  z, Page2of3
+416   8193              Page1of3:
+417   8193 06 00        	ld  b, 0					;start from first file for page 1
+418   8195 0E 2C        	ld  c, MAX_FILES_SCR		;display full page of files, more to come
+419   8197 18 0E        	jr  FindCacheLine
+420   8199              Page2of3:
+421   8199 06 2C        	ld  b, MAX_FILES_SCR		;skip first page of files for page 2
+422   819B 0E 2C        	ld  c, MAX_FILES_SCR		;display full page of files, more to come
+423   819D 18 08        	jr  FindCacheLine
+424   819F              Page3of3:
+425   819F 06 58        	ld  b, 2*MAX_FILES_SCR		;skip first 2 pages of files for page 3
+426   81A1 79           	ld  a, c
+427   81A2 D6 2C        	sub MAX_FILES_SCR
+428   81A4 D6 2C        	sub MAX_FILES_SCR
+429   81A6 4F           	ld  c, a					;get rest of files for page 2
+430   81A7
+431   81A7              FindCacheLine:
+432   81A7 11 0D 00     	ld	de, CACHE_LN_SZ
+433   81AA 21 08 84     	ld 	hl, Cache
+434   81AD 78           	ld  a, b
+435   81AE B7           	or  a
+436   81AF 28 03        	jr  z, ListReady
+437   81B1              FindCacheLineLoop:
+438   81B1 19           	add	hl, de
+439   81B2 10 FD        	djnz FindCacheLineLoop
+440   81B4
+441   81B4              ListReady:
+442   81B4 41           	ld  b, c
+443   81B5
+444   81B5 C9           	ret
+445   81B6
+446   81B6              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+447   81B6              ;Shows file lists for one screen, with cache from HL and file count from B
+448   81B6              DisplayOneScreen:
+449   81B6 C5           	push	bc
+450   81B7 E5           	push	hl
+451   81B8 3E 02        		ld  a, 2
+452   81BA CD AF 0D     		call ROM_OPEN_SCR_CLR
+453   81BD              		;Display occupied space, file number, free space, page
+454   81BD CD 10 83     		call DisplayStats
+455   81C0 E1           	pop		hl
+456   81C1 C1           	pop		bc
+457   81C2
+458   81C2 C5           	push 	bc
+459   81C3 E5           	push 	hl
+460   81C4 CD CA 81     		call DisplayFilesInfo
+461   81C7 E1           	pop	 hl
+462   81C8 C1           	pop  bc
+463   81C9
+464   81C9 C9           	ret
+465   81CA
+466   81CA
+467   81CA              ;Displays info for each file. A table already contains lines of: FileName, RC count
+468   81CA              ;IN HL=file cache line, B=file count
+469   81CA              DisplayFilesInfo:
+470   81CA E5           	push hl
+471   81CB 3E 02        	ld  a, 2
+472   81CD CD 01 16     	call ROM_OPEN_SCR
+473   81D0 E1           	pop	hl
+474   81D1              	;prevent scroll up, to be able to display on row 21
+475   81D1 AF           	xor a
+476   81D2 32 6B 5C     	ld  (VAR_SCROLL2), a
+477   81D5
+478   81D5              	;return if 0 files on disk
+479   81D5 78           	ld a, b
+480   81D6 B7           	or a
+481   81D7 C8           	ret z
+482   81D8              DisplayLoop:
+483   81D8 C5           	push bc
+484   81D9 E5           	push hl
+485   81DA              		;set file name for display
+486   81DA 11 E7 83     		ld   de, FileName
+487   81DD D5           		push de
+488   81DE 01 0B 00     			ld	 bc, NAMELEN
+489   81E1 ED B0        			ldir
+490   81E3
+491   81E3 4E 23 46 2B  			ld  bc, (hl)
+492   81E7 69           			ld  l, c
+493   81E8 60           			ld  h, b
+494   81E9 CD D4 80     			call DisplayFileLength
+495   81EC DD E1        		pop  ix
+496   81EE
+497   81EE CD 29 82     		call CheckAttributes
+498   81F1
+499   81F1              		;fix invalid chars in name
+500   81F1 06 0B        		ld  b, NAMELEN
+501   81F3 21 E7 83     		ld  hl, FileName
+502   81F6              FileNameCopy:
+503   81F6 7E           		ld  a, (hl)
+504   81F7 E6 7F        		and $7F									;clear bit 7; LOAD accepts bit 7 set or not (char SCREEN$ or *)
+505   81F9 FE 20        		cp  ' '
+506   81FB 30 02        		jr  nc, GoodChar
+507   81FD 3E 3F        		ld  a, '?'
+508   81FF              GoodChar:
+509   81FF 77           		ld  (hl), a
+510   8200 23           		inc  hl
+511   8201 10 F3        		djnz FileNameCopy
+512   8203
+513   8203              		;display line
+514   8203 21 DE 83     		ld hl, DisplayedLine
+515   8206 06 1B        		ld b, DisplayedLineEnd-DisplayedLine	;how many chars on one line
+516   8208 CD 13 80     		call PrintStr
+517   820B
+518   820B              		;set tab every 2 entries
+519   820B 3A DF 83     		ld a, (TabChar)
+520   820E EE 10        		xor 16
+521   8210 32 DF 83     		ld (TabChar), a
+522   8213 E1           	pop hl
+523   8214 01 0D 00     	ld  bc, CACHE_LN_SZ
+524   8217 09           	add hl, bc
+525   8218 C1           	pop bc
+526   8219
+527   8219              	;set alternating bright every 2 entries
+528   8219 78           	ld a, b
+529   821A E6 02        	and 2
+530   821C CB 3F        	srl a
+531   821E 32 E4 83     	ld (DisplayedBright), a
+532   8221 10 B5        	djnz DisplayLoop
+533   8223
+534   8223              	;restore scroll, to prevent crash
+535   8223 21 6B 5C     	ld  hl, VAR_SCROLL2
+536   8226 36 02        	ld  (hl), 2
+537   8228 C9           	ret
+538   8229
+539   8229
+540   8229              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+541   8229
+542   8229              ;Checks the attributes and reset the bits, saving result as color attribute
+543   8229              ;IX=file name
+544   8229              CheckAttributes:
+545   8229 3E 04        	ld  a, CLR_NAME
+546   822B DD CB 08 7E  	bit 7, (ix+ATTR_RO_POS)
+547   822F 28 06        	jr  z, NotRO
+548   8231 DD CB 08 BE  	res 7, (ix+ATTR_RO_POS)
+549   8235 3E 02        	ld  a, CLR_RO
+550   8237              NotRO:
+551   8237 DD CB 09 7E  	bit 7, (ix+ATTR_SYS_POS)
+552   823B 28 0E        	jr  z, NotSys
+553   823D DD CB 09 BE  	res 7, (ix+ATTR_SYS_POS)
+554   8241 FE 02        	cp  CLR_RO
+555   8243 28 04        	jr  z, BothAttr
+556   8245 3E 03        	ld  a, CLR_SYS
+557   8247 18 02        	jr  NotSys
+558   8249              BothAttr:
+559   8249 3E 06        	ld  a, CLR_RO_SYS
+560   824B              NotSys:
+561   824B 32 E6 83     	ld (FileNameClr), a
+562   824E C9           	ret
+563   824F
+564   824F
+565   824F              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+566   824F
+567   824F              ;Read directory and create a table (name - 11B, RC count - 2B)
+568   824F              ReadCatalog1:
+569   824F 21 F9 83     	ld hl, FileMask
+570   8252 3A 04 84     	ld a, (DRIVE)
+571   8255 47           	ld b, a							;drive
+572   8256 0E 0B        	ld c, NAMELEN					;name len
+573   8258 CD 45 80     	call CreateChannel
+574   825B CD 84 80     	call SetDMA
+575   825E
+576   825E 3E 00        	ld	a, 0						;request first extension
+577   8260 DD 77 0C     	ld (ix + FCB_EX_IDX), a
+578   8263
+579   8263 CD 7C 80     	call FindFirst
+580   8266 11 08 84     	ld de, Cache
+581   8269
+582   8269              CatNext:
+583   8269 3C           	inc a
+584   826A 28 33        	jr z, CatEnd			;return if A=FFh
+585   826C 3D           	dec a
+586   826D
+587   826D DD E5        	push ix
+588   826F 01 26 00     		ld bc, CH_DMA
+589   8272 DD 09        		add ix, bc
+590   8274
+591   8274              		;A is the index for the 32 byte dir. entry in DMA buffer
+592   8274 17           		rla
+593   8275 17           		rla
+594   8276 17           		rla
+595   8277 17           		rla
+596   8278 17           		rla
+597   8279 06 00        		ld b, 0
+598   827B 4F           		ld c, a
+599   827C DD 09        		add ix, bc						;hl=file name -1=FCB
+600   827E
+601   827E              		;put name in cache
+602   827E DD E5        		push ix
+603   8280 E1           		pop hl
+604   8281 23           		inc hl						;HL = file name
+605   8282 01 0B 00     		ld  bc, NAMELEN
+606   8285 ED B0        		ldir
+607   8287
+608   8287              		;skip EX, S1, S2
+609   8287 23           		inc hl
+610   8288 23           		inc hl
+611   8289 23           		inc hl
+612   828A              		;save RC count for first extension
+613   828A ED A0        		ldi
+614   828C AF           		xor a
+615   828D 12           		ld (de), a
+616   828E 13           		inc de
+617   828F DD E1        	pop  ix
+618   8291
+619   8291 3A 05 84     	ld a, (FileCnt)
+620   8294 3C           	inc a
+621   8295 32 05 84     	ld (FileCnt), a
+622   8298
+623   8298              	;find next file
+624   8298 D5           	push de
+625   8299 CD 80 80     		call FindNext
+626   829C D1           	pop de
+627   829D
+628   829D 18 CA        	jr CatNext
+629   829F              CatEnd:
+630   829F
+631   829F CD 5A 80     	call DestroyChannel
+632   82A2 C9           	ret
+633   82A3
+634   82A3
+635   82A3              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+636   82A3              ;Will ignore extensions with index 0, will add up RC count for subsequent extensions.
+637   82A3              ReadCatalog2:
+638   82A3 21 F9 83     	ld hl, FileMask
+639   82A6 3A 04 84     	ld a, (DRIVE)
+640   82A9 47           	ld b, a							;drive
+641   82AA 0E 0B        	ld c, NAMELEN					;name len
+642   82AC CD 45 80     	call CreateChannel
+643   82AF CD 84 80     	call SetDMA
+644   82B2
+645   82B2 3E 3F        	ld	a, '?'						;request all extensions
+646   82B4 DD 77 0C     	ld (ix + FCB_EX_IDX), a
+647   82B7
+648   82B7 CD 7C 80     	call FindFirst
+649   82BA
+650   82BA              CatNext2:
+651   82BA 3C           	inc a
+652   82BB 28 3A        	jr z, CatEnd2			;return if A=FFh
+653   82BD 3D           	dec a
+654   82BE
+655   82BE DD E5        	push ix
+656   82C0 01 26 00     		ld bc, CH_DMA
+657   82C3 DD 09        		add ix, bc
+658   82C5
+659   82C5              		;A is the index for the 32 byte dir. entry in DMA buffer
+660   82C5 17           		rla
+661   82C6 17           		rla
+662   82C7 17           		rla
+663   82C8 17           		rla
+664   82C9 17           		rla
+665   82CA 06 00        		ld b, 0
+666   82CC 4F           		ld c, a
+667   82CD DD 09        		add ix, bc						;hl=file name -1=FCB
+668   82CF
+669   82CF              		;now ignore entries with index 0, as these are already processed
+670   82CF DD 7E 0C     		ld  a, (ix + FCB_EX_IDX)
+671   82D2 B7           		or  a
+672   82D3 28 1B        		jr  z, Cat2Index0
+673   82D5
+674   82D5              		;find cache for this file
+675   82D5 DD E5        		push ix
+676   82D7 E1           		pop  hl
+677   82D8 23           		inc  hl
+678   82D9 CD FB 82     		call FindCache
+679   82DC
+680   82DC EB           		ex  de, hl
+681   82DD 01 0B 00     		ld  bc, NAMELEN
+682   82E0 09           		add hl, bc
+683   82E1
+684   82E1              		;add RC count in cache
+685   82E1 4E           		ld  c, (hl)
+686   82E2 23           		inc hl
+687   82E3 46           		ld  b, (hl)
+688   82E4 2B           		dec hl
+689   82E5 EB           		ex  de, hl
+690   82E6 DD 6E 0F     		ld  l, (ix + FCB_RC)
+691   82E9 26 00        		ld  h, 0
+692   82EB 09           		add hl, bc
+693   82EC EB           		ex  de, hl
+694   82ED 73           		ld  (hl), e
+695   82EE 23           		inc hl
+696   82EF 72           		ld  (hl), d
+697   82F0              Cat2Index0:
+698   82F0 DD E1        	pop  ix
+699   82F2
+700   82F2 CD 80 80     	call FindNext
+701   82F5
+702   82F5 18 C3        	jr CatNext2
+703   82F7              CatEnd2:
+704   82F7
+705   82F7 CD 5A 80     	call DestroyChannel
+706   82FA C9           	ret
+707   82FB
+708   82FB              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+709   82FB              ;IN HL = name address
+710   82FB              ;OUT DE = file row in cache
+711   82FB              FindCache:
+712   82FB 11 08 84     	ld  de, Cache
+713   82FE
+714   82FE              FindCacheLoop:
+715   82FE E5           	push hl
+716   82FF D5           	push de
+717   8300 06 0B        		ld  b, NAMELEN
+718   8302 CD 1D 80     		call StrCmp
+719   8305 D1           	pop  de
+720   8306 E1           	pop  hl
+721   8307 C8           	ret z
+722   8308
+723   8308              	;skip RC count in cache
+724   8308 EB           	ex  de, hl
+725   8309 01 0D 00     	ld  bc, CACHE_LN_SZ
+726   830C 09           	add hl, bc
+727   830D EB           	ex  de, hl
+728   830E 18 EE        	jr  FindCacheLoop
+729   8310
+730   8310
+731   8310              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+732   8310
+733   8310              ;Displays free space
+734   8310              DisplayStats:
+735   8310 2A 06 84     	ld   hl, (UsedKB)
+736   8313 E5           	push hl
+737   8314 11 BC 83     		ld de, UsedSpaceAsc
+738   8317 CD 41 83     		call N2ASCII3
+739   831A C1           	pop  bc
+740   831B
+741   831B 21 7C 02     	ld  hl, (MAX_FREE_AU_CNT * AU_SZ)/1024
+742   831E B7 ED 42     	sub hl, bc
+743   8321 11 D1 83     	ld de, FreeSpaceAsc
+744   8324 CD 41 83     	call N2ASCII3
+745   8327
+746   8327 3A 05 84     	ld a, (FileCnt)
+747   832A 26 00        	ld h, 0
+748   832C 6F           	ld l, a
+749   832D 11 C6 83     	ld de, FileCntMsg
+750   8330 CD 41 83     	call N2ASCII3
+751   8333
+752   8333 3E 00        	ld	a, 0
+753   8335 CD 01 16     	call ROM_OPEN_SCR
+754   8338 21 8C 83     	ld hl, FreeSpaceMsg
+755   833B 06 52        	ld b, FreeSpaceMsgEnd - FreeSpaceMsg
+756   833D CD 13 80     	call PrintStr
+757   8340 C9           	ret
+758   8341
+759   8341
+760   8341              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Number routines ;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+761   8341
+762   8341              ;Converts the 3 digit number in HL to ASCII at DE
+763   8341              N2ASCII3:
+764   8341 D5           	push de
+765   8342 CD 72 83     		call N2ASCII_DEC3
+766   8345 D1           	pop de
+767   8346 01 00 02     	ld  bc, $0200
+768   8349 18 08        	jr StrippLoop
+769   834B
+770   834B              ;Converts the 5 digit number in HL to ASCII
+771   834B              N2ASCII5:
+772   834B D5           	push de
+773   834C CD 66 83     		call N2ASCII_DEC
+774   834F D1           	pop de
+775   8350
+776   8350              StrippLeading0:
+777   8350 01 00 04     	ld bc, $0400
+778   8353              	;ld c, 0
+779   8353              StrippLoop:
+780   8353 1A           	ld a, (de)
+781   8354 FE 30        	cp '0'
+782   8356 20 09        	jr nz, MarkNon0
+783   8358 79           	ld a, c
+784   8359              	;cp 0
+785   8359 B7           	or a
+786   835A 20 06        	jr nz, NextChar
+787   835C 3E 20        	ld a, ' '
+788   835E 12           	ld (de), a
+789   835F 18 01        	jr NextChar
+790   8361              MarkNon0:
+791   8361 0C           	inc c
+792   8362              NextChar:
+793   8362 13           	inc de
+794   8363 10 EE        	djnz StrippLoop
+795   8365 C9           	ret
+796   8366
+797   8366
+798   8366              ;The folowing routine was inspired from: Milos "baze" Bazelides, baze@stonline.sk
+799   8366              ;http://map.tni.nl/sources/external/z80bits.html
+800   8366
+801   8366              ;Converts the number in HL to ASCII in decimal string at DE
+802   8366              N2ASCII_DEC:
+803   8366 01 F0 D8     	ld bc, -10000
+804   8369 CD 81 83     	call DigitLoop
+805   836C 01 18 FC     	ld bc, -1000
+806   836F CD 81 83     	call DigitLoop
+807   8372              N2ASCII_DEC3:
+808   8372 01 9C FF     	ld bc, -100
+809   8375 CD 81 83     	call DigitLoop
+810   8378 01 F6 FF     	ld bc, -10
+811   837B CD 81 83     	call DigitLoop
+812   837E 01 FF FF     	ld bc, -1
+813   8381
+814   8381              DigitLoop:
+815   8381 3E 2F        	ld	a, '0' - 1
+816   8383              DivNrLoop:
+817   8383 3C           	inc	a			;increase reminder
+818   8384 09           	add	hl, bc		;substract divizor
+819   8385 38 FC        	jr	c, DivNrLoop	;still dividing?
+820   8387 ED 42        	sbc	hl, bc		;nope, restore
+821   8389
+822   8389 12           	ld (de), a
+823   838A 13           	inc de
+824   838B C9           	ret
+825   838C
+826   838C
+827   838C              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Allocated Data ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+828   838C
+829   838C              FreeSpaceMsg:
+830   838C 13 01        				DEFB    19, 1			;bright 1
+831   838E 11 06        				DEFB	17, CLR_RO_SYS
+832   8390 50 61 67 65  				DEFB	"Page"
+833   8394 31 2F        ScrPageMsg		DEFB	"1/"
+834   8396 31           ScrPageMsgMax	DEFB	"1"
+835   8397 11 04 4E 61  				DEFB	17, CLR_NAME, "Name"
+835   839B 6D 65
+836   839D 11 05 4C 65  				DEFB	17, CLR_LEN, "Len B"
+836   83A1 6E 20 42
+837   83A4 11 02 2B 52  				DEFB    17, CLR_RO, "+R/O"
+837   83A8 2F 4F
+838   83AA 11 03 2B 53  				DEFB 	17, CLR_SYS, "+SYS"
+838   83AE 59 53
+839   83B0 11 06 2B 52  				DEFB 	17, CLR_RO_SYS, "+R/O+SYS"
+839   83B4 2F 4F 2B 53
+839   83B8 59 53
+840   83BA
+841   83BA
+842   83BA 14 01        				DEFB	20, 1			;inverse 1
+843   83BC 20 20 20 20  UsedSpaceAsc	DEFM	"    KB in "
+843   83C0 4B 42 20 69
+843   83C4 6E 20
+844   83C6 20 20 20 20  FileCntMsg		DEFM    "    files, "
+844   83CA 66 69 6C 65
+844   83CE 73 2C 20
+845   83D1 20 20 20 20  FreeSpaceAsc	DEFB	"    KB free"
+845   83D5 4B 42 20 66
+845   83D9 72 65 65
+846   83DC 14 00        				DEFB	20, 0			;inverse 0
+847   83DE              FreeSpaceMsgEnd:
+848   83DE
+849   83DE
+850   83DE
+851   83DE              DisplayedLine:
+852   83DE 17           				DEFB	23						;tab
+853   83DF 00 00        TabChar			DEFB	0, 0
+854   83E1 10 00        				DEFB	16, CLR_BLACK			;ink 0
+855   83E3 13           				DEFM	19
+856   83E4 00           DisplayedBright	DEFB	0				;bright is alternating
+857   83E5 11           				DEFB	17				;paper
+858   83E6 04           FileNameClr		DEFB	CLR_NAME
+859   83E7 3F 3F 3F 3F  FileName		DEFM	"???????????"
+859   83EB 3F 3F 3F 3F
+859   83EF 3F 3F 3F
+860   83F2 11 05        				DEFB	17, CLR_LEN
+861   83F4 20 20 20 20  FileLen			DEFB	"     "
+861   83F8 20
+862   83F9              DisplayedLineEnd:
+863   83F9
+864   83F9              ;the search mask
+865   83F9 3F 3F 3F 3F  FileMask		DEFM	"???????????"
+865   83FD 3F 3F 3F 3F
+865   8401 3F 3F 3F
+866   8404 00           DRIVE			DEFB	0		;0=A:, 1=B: for BDOS, 0 = use current drive for BASIC; can be poked with the desired drive, it's the last byte in block
+867   8405              END
+868   8405
+869   8405              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Unalocated Variables ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+870   8405
+871   8405              FileCnt			EQU		DRIVE + 1		;file index for display
+872   8405              UsedKB			EQU		FileCnt + 1
+873   8405              Cache			EQU		UsedKB + 2		;here goes the cache table
+874   8405
+875   8405              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Constants ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+876   8405
+877   8405              START_ADDR		EQU	$8000		;Start address
+878   8405
+879   8405              ;System variables for disk
+880   8405              DSTR1			EQU	$5CD6		;drive
+881   8405              FSTR1			EQU	$5CDC		;file name
+882   8405              NSTR1			EQU	$5CDA		;name length
+883   8405              HD11			EQU	$5CED		;BDOS argument
+884   8405              COPIES			EQU	$5CEF		;BDOS function
+885   8405
+886   8405              ;File name stuff
+887   8405              NAMELEN			EQU	11			;name length
+888   8405              ATTR_RO_POS		EQU	8			;read-only attribute position in name
+889   8405              ATTR_SYS_POS	EQU	9			;system attribute position in name
+890   8405
+891   8405              ;File types (first byte in header)
+892   8405              PROG_TYPE		EQU	0			;program
+893   8405              NUMB_TYPE		EQU	1			;number array
+894   8405              CHAR_TYPE		EQU	2			;char array
+895   8405              BYTE_TYPE		EQU	3			;bytes
+896   8405              TEXT_TYPE		EQU	4			;text
+897   8405
+898   8405              ;Disk geometry stuff
+899   8405              SPT				EQU	16			;sectors per track
+900   8405              SECT_SZ			EQU	256			;sector size in bytes
+901   8405              TRACK_CNT		EQU	80			;track count
+902   8405              HEAD_CNT		EQU	2			;disk face count
+903   8405              AU_SZ			EQU	2048		;allocation unit size in bytes
+904   8405              DIR_ENT_SZ		EQU	32			;directory entry size
+905   8405              DIR_TRK_CNT		EQU	1			;tracks rezerved for directory
+906   8405              SPAL			EQU	(AU_SZ/SECT_SZ);sectors per allocation unit
+907   8405              MAX_DIR_ENT		EQU	(SPT * DIR_TRK_CNT * SECT_SZ / DIR_ENT_SZ);maximum directory entries
+908   8405              MAX_AU_CNT		EQU	(TRACK_CNT * HEAD_CNT * SPT * SECT_SZ)/AU_SZ
+909   8405              MAX_FREE_AU_CNT	EQU	((TRACK_CNT * HEAD_CNT - DIR_TRK_CNT) * SPT * SECT_SZ)/AU_SZ ;max free allocation units
+910   8405              REC_SZ			EQU 128			;cp/m record size
+911   8405              FINISH_CHR		EQU $1A			;file terminator char
+912   8405
+913   8405              ;File header offsets
+914   8405              HDR_TYPE		EQU	0
+915   8405              HDR_LEN			EQU 1
+916   8405              HDR_ADDR		EQU 3
+917   8405              HDR_VAR			EQU	5
+918   8405              HDR_LINE		EQU 7
+919   8405              HDR_SIZE		EQU 9
+920   8405
+921   8405              ;Disk cache table structure
+922   8405              CACHE_NAME		EQU 0
+923   8405              CACHE_RC_CNT	EQU NAMELEN
+924   8405              CACHE_LN_SZ		EQU NAMELEN +2
+925   8405
+926   8405              ;BASIC disk channel structure
+927   8405              CH_RW_FLAG		EQU 11
+928   8405              CH_FCB			EQU	12
+929   8405              CH_DATA			EQU	50
+930   8405              CH_DMA			EQU CH_DATA - CH_FCB	;offset of DMA from start of FCB
+931   8405
+932   8405              ;Extension structure (directory entry)
+933   8405              EXT_DEL_FLAG	EQU	0
+934   8405              EXT_NAME		EQU 1
+935   8405              EXT_IDX			EQU 12
+936   8405              EXT_S1			EQU 13
+937   8405              EXT_S2			EQU 14
+938   8405              EXT_RC			EQU	15
+939   8405              EXT_AU0			EQU	16
+940   8405              EXT_AU1			EQU	18
+941   8405              EXT_AU2			EQU	20
+942   8405              EXT_AU3			EQU	22
+943   8405              EXT_AU4			EQU	24
+944   8405              EXT_AU5			EQU	26
+945   8405              EXT_AU6			EQU	28
+946   8405              EXT_AU7			EQU	30
+947   8405              EXT_AU_CNT		EQU 8
+948   8405
+949   8405              ;FCB structure
+950   8405              FCB_DRIVE		EQU 0			;0 is current drive
+951   8405              FCB_NAME		EQU EXT_NAME
+952   8405              FCB_EX_IDX		EQU EXT_IDX
+953   8405              FCB_S1			EQU EXT_S1
+954   8405              FCB_S2			EQU EXT_S2
+955   8405              FCB_RC			EQU	EXT_RC
+956   8405              FCB_AU			EQU	EXT_AU0
+957   8405              FCB_CR			EQU	32
+958   8405              FCB_R0			EQU 33
+959   8405              FCB_R1			EQU 34
+960   8405              FCB_R2			EQU 35
+961   8405
+962   8405              ROM_OPEN_SCR	EQU	$1601
+963   8405              ROM_OPEN_SCR_CLR	EQU	$0DAF
+964   8405              ROM_PRINT		EQU $203C		;DE = string, BC = len
+965   8405
+966   8405              CLR_BLACK		EQU	0
+967   8405              CLR_BLUE		EQU	1
+968   8405              CLR_RED			EQU	2
+969   8405              CLR_MAGENTA		EQU	3
+970   8405              CLR_GREEN		EQU	4
+971   8405              CLR_CYAN		EQU	5
+972   8405              CLR_YELLOW		EQU	6
+973   8405              CLR_WHITE		EQU	7
+974   8405
+975   8405              CLR_NAME		EQU CLR_GREEN
+976   8405              CLR_RO			EQU	CLR_RED
+977   8405              CLR_SYS			EQU	CLR_MAGENTA
+978   8405              CLR_RO_SYS		EQU	CLR_YELLOW
+979   8405              CLR_LEN			EQU	CLR_CYAN
+980   8405
+981   8405              VAR_SCROLL		EQU	23692
+982   8405              VAR_SCROLL2		EQU	23659
+983   8405
+984   8405              ;key codes
+985   8405              KEY_ESC			EQU	7
+986   8405              KEY_LEFT		EQU	8
+987   8405              KEY_RIGHT		EQU	9
+988   8405              KEY_DOWN		EQU	10
+989   8405              KEY_UP			EQU	11
+990   8405              KEY_ENTER		EQU	13
+991   8405              KEY_CTRL		EQU	14
+992   8405
+993   8405              MAX_FILES_SCR	EQU	44
+994   8405
+995   8405
+996   8405              				EMPTYTAP "cat.tap"
+997   8405              				savetap "cat.tap", CODE, "hccat", start, END-start
+998   8405              ;				savebin "cat.bin", start, END-start
+999   8405
+# file closed: D:\Spectrum\src\HC\HCCat\3\cat.ASM
+
+Value    Label
+------ - -----------------------------------------------------------
+0x000E X KEY_CTRL
+0x000D X KEY_ENTER
+0x5C8C X VAR_SCROLL
+0x0007 X CLR_WHITE
+0x0006   CLR_YELLOW
+0x0005   CLR_CYAN
+0x0004   CLR_GREEN
+0x0003   CLR_MAGENTA
+0x0002   CLR_RED
+0x0001 X CLR_BLUE
+0x203C X ROM_PRINT
+0x0023 X FCB_R2
+0x0022 X FCB_R1
+0x0021 X FCB_R0
+0x0020 X FCB_CR
+0x0010 X FCB_AU
+0x000E X FCB_S2
+0x000D X FCB_S1
+0x0001 X FCB_NAME
+0x0000 X FCB_DRIVE
+0x0008 X EXT_AU_CNT
+0x001E X EXT_AU7
+0x001C X EXT_AU6
+0x001A X EXT_AU5
+0x0018 X EXT_AU4
+0x0016 X EXT_AU3
+0x0014 X EXT_AU2
+0x0012 X EXT_AU1
+0x0010   EXT_AU0
+0x000F   EXT_RC
+0x000E   EXT_S2
+0x000D   EXT_S1
+0x000C   EXT_IDX
+0x0001   EXT_NAME
+0x0000 X EXT_DEL_FLAG
+0x0032   CH_DATA
+0x000B X CH_RW_FLAG
+0x000B X CACHE_RC_CNT
+0x0000 X CACHE_NAME
+0x0009 X HDR_SIZE
+0x0007 X HDR_LINE
+0x0005 X HDR_VAR
+0x0003 X HDR_ADDR
+0x0001 X HDR_LEN
+0x0000 X HDR_TYPE
+0x001A X FINISH_CHR
+0x0080 X REC_SZ
+0x0140 X MAX_AU_CNT
+0x0080 X MAX_DIR_ENT
+0x0008 X SPAL
+0x0001   DIR_TRK_CNT
+0x0020   DIR_ENT_SZ
+0x0002   HEAD_CNT
+0x0050   TRACK_CNT
+0x0100   SECT_SZ
+0x0010   SPT
+0x0004 X TEXT_TYPE
+0x0003 X BYTE_TYPE
+0x0002 X CHAR_TYPE
+0x0001 X NUMB_TYPE
+0x0000 X PROG_TYPE
+0x8405 X END
+0x0000   CLR_BLACK
+0x0005   CLR_LEN
+0x8383   DivNrLoop
+0x8381   DigitLoop
+0x8362   NextChar
+0x8361   MarkNon0
+0x8350 X StrippLeading0
+0x8366   N2ASCII_DEC
+0x8353   StrippLoop
+0x8372   N2ASCII_DEC3
+0x83DE   FreeSpaceMsgEnd
+0x838C   FreeSpaceMsg
+0x83C6   FileCntMsg
+0x83D1   FreeSpaceAsc
+0x0800   AU_SZ
+0x013E   MAX_FREE_AU_CNT
+0x83BC   UsedSpaceAsc
+0x82FE   FindCacheLoop
+0x000F   FCB_RC
+0x82FB   FindCache
+0x82F0   Cat2Index0
+0x82F7   CatEnd2
+0x82BA   CatNext2
+0x829F   CatEnd
+0x8269   CatNext
+0x000C   FCB_EX_IDX
+0x83F9   FileMask
+0x83E6   FileNameClr
+0x0006   CLR_RO_SYS
+0x0003   CLR_SYS
+0x8249   BothAttr
+0x824B   NotSys
+0x0009   ATTR_SYS_POS
+0x0002   CLR_RO
+0x8237   NotRO
+0x0008   ATTR_RO_POS
+0x0004   CLR_NAME
+0x83F9   DisplayedLineEnd
+0x83DE   DisplayedLine
+0x81FF   GoodChar
+0x81F6   FileNameCopy
+0x8229   CheckAttributes
+0x83E7   FileName
+0x81D8   DisplayLoop
+0x5C6B   VAR_SCROLL2
+0x1601   ROM_OPEN_SCR
+0x81CA   DisplayFilesInfo
+0x81B1   FindCacheLineLoop
+0x81B4   ListReady
+0x000D   CACHE_LN_SZ
+0x8193 X Page1of3
+0x8199   Page2of3
+0x819F   Page3of3
+0x817C X Page1of2
+0x8182   Page2of2
+0x81A7   FindCacheLine
+0x818A   ThreeScreensMax
+0x8177   TwoScreensMax
+0x8173   OneScreenMax
+0x0008   KEY_LEFT
+0x0009   KEY_RIGHT
+0x8151   PrevScr
+0x000B   KEY_UP
+0x8144   NextScr
+0x000A   KEY_DOWN
+0x0007   KEY_ESC
+0x812C   ReadCharLoop
+0x81B6   DisplayOneScreen
+0x815C   GetFileListForScreen
+0x83E4   DisplayedBright
+0x83DF   TabChar
+0x811F   DisplayFilesLoop
+0x002C   MAX_FILES_SCR
+0x8119   ScreenCntLoop
+0x8310   DisplayStats
+0x8116   NonEmptyDisk
+0x8396   ScrPageMsgMax
+0x8394   ScrPageMsg
+0x8341   N2ASCII3
+0x834B   N2ASCII5
+0x83F4   FileLen
+0x80EF   BigFile
+0x80D4   DisplayFileLength
+0x80CF   NoPartialAU
+0x80B6   GetFileSizeOnDiskKB
+0x000B   NAMELEN
+0x809A   FileSizeLoop
+0x8408   Cache
+0x0026   CH_DMA
+0x8084   SetDMA
+0x8080   FindNext
+0x807C   FindFirst
+0x8404   DRIVE
+0x5CEF   COPIES
+0x5CED   HD11
+0x8062   BDOS
+0x805A   DestroyChannel
+0x000C   CH_FCB
+0x5CDA   NSTR1
+0x5CD6   DSTR1
+0x5CDC   FSTR1
+0x8045   CreateChannel
+0x0DAF   ROM_OPEN_SCR_CLR
+0x8405   FileCnt
+0x8406   UsedKB
+0x8070   SelectDisk
+0x806C   InitDos
+0x8042   InitVars
+0x8027   MisMatch
+0x801F   Compare
+0x801D   StrCmp
+0x8013   PrintStr
+0x8010   ReadChar
+0x8101   DisplayFiles
+0x8093   GetDiskUsedSpace
+0x82A3   ReadCatalog2
+0x824F   ReadCatalog1
+0x802A   Init
+0x8000 X start
+0x8000   START_ADDR
