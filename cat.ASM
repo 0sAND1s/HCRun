@@ -42,6 +42,7 @@
 start:
 	;Init IF1, disk, variables
 	call Init	
+ReadDiskAgain:	
 	;First read of catalog, to get file list	
 	call ReadCatalog1				
 	;Second read of catalog, to get file size
@@ -49,8 +50,8 @@ start:
 	;Calculate space used by files on disk
 	call GetDiskUsedSpace	
 	;Display list of files	
-	call DisplayFiles
-	
+	call DisplayFiles	
+
 	ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Char routines ;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -98,24 +99,35 @@ MisMatch:
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
 
 Init:
-;These 3 calls are not needed when this program is launched from disk, as it will display the current disk.
+;These 2 calls are not needed when this program is launched from disk, as it will display the current disk.
 ;If loaded from tape, it won't work without the 2 calls, since they are needed for DOS initialisation and selecting A: or B:.	
-	call InitVars
-	call InitDos
-	call SelectDisk
+	call InitVars	
+	
+	;Select the current drive to work with instead of hardcoding A:.
+	call GetCurrentDrive	
+	cp $FF							;$FF = no current drive, forca A:
+	jr  z, CurrentDriveNone		
+	inc  a							;translate CP/M drive to BASIC drive: 0 -> 1, 1 -> 2
+	jr  SelectDriveInit
+CurrentDriveNone:	
+	ld  a, DRIVE_A
+SelectDriveInit:	
+	call SelectDrive
 
 	xor a
 	ld l, a
 	ld h, a
 	ld (UsedKB), hl					;reset used blocks		
-	ld (FileCnt), a					;reset file counter		
+	ld (FileCnt), a					;reset file counter					
+	ld  a, MAX_DIR_ENT
+	ld (FreeCatalog), a
 	
 	;CLS
 	ld  a, 2
 	call ROM_OPEN_SCR_CLR		
-
+	
 	ret
-
+	
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Disk routines ;;;;;;;;;;;;;;;;;;;;;;;;;
 	
 ;Insert IF1 variables
@@ -128,12 +140,12 @@ InitVars:
 ;IN: HL=name addr, B=drive, C=name len
 ;OUT: IX=FCB
 CreateChannel:
-	ld (FSTR1), hl
+	ld (VAR_FSTR1), hl
 	ld h,0
 	ld l,b
-	ld (DSTR1), hl
+	ld (VAR_DSTR1), hl
 	ld l,c
-	ld (NSTR1), hl
+	ld (VAR_NSTR1), hl
 	rst 08
 	DEFB 55
 	ld bc, CH_FCB			;adjust to get cp/m fcb
@@ -154,8 +166,8 @@ DestroyChannel:
 ;Generic BDOS call
 ;IX=arg, A=function
 BDOS:
-	ld (HD11), ix
-	ld (COPIES), a
+	ld (VAR_HD11), ix
+	ld (VAR_COPIES), a
 	rst 08
 	DEFB 57
 	ret
@@ -164,14 +176,21 @@ InitDos:
 	ld	a, 0
 	jr	BDOS	
 
-SelectDisk:	
-	ld  a, (DRIVE)
+;IN A=selected drive	
+SelectDrive:		
+	ld  (DRIVE_SELECTED), a
+	dec a		;CPM drive is 0=A or 1=B. For BASIC is 1=A, 2=B, 0=current drive. So we must convert it for the CPM call, otherwise the BDOS function crashes.
 	ld  ixh, 0
 	ld	ixl, a	;0=A, 1=B
 	ld	a, 1	;1=Select disk	
-	jr	BDOS
+	jr	BDOS		
+	ret
 
-
+;Returns current disk in A: 0=A:, 1=B:, $FF=no current drive
+GetCurrentDrive:	
+	ld a, 12
+	jr BDOS
+	
 ;FindFirst
 ;IX=fcb
 FindFirst:
@@ -344,7 +363,7 @@ DisplayFilesLoop:
 ReadCharLoop:
 	call ReadChar	
 	cp  KEY_ESC
-	ret z		
+	ret z
 	cp  KEY_DOWN
 	jr  z, NextScr
 	cp  KEY_UP
@@ -353,7 +372,22 @@ ReadCharLoop:
 	jr  z, NextScr
 	cp  KEY_LEFT
 	jr  z, PrevScr
+	cp  '1'
+	jr  z, SelectDriveA
+	cp  '2'
+	jr  z, SelectDriveB
 	jr  ReadCharLoop
+		
+	
+SelectDriveA:
+	ld  a, DRIVE_A
+	jr  SwitchDrive
+SelectDriveB:
+	ld  a, DRIVE_B
+SwitchDrive:		
+	call SelectDrive
+	pop  hl							;restore stack for this call
+	jp   start
 
 NextScr:
 	ld hl, ScrPageMsg
@@ -567,7 +601,7 @@ NotSys:
 ;Read directory and create a table (name - 11B, RC count - 2B)
 ReadCatalog1:	
 	ld hl, FileMask
-	ld a, (DRIVE)
+	ld a, (DRIVE_SELECTED)
 	ld b, a							;drive
 	ld c, NAMELEN					;name len	
 	call CreateChannel
@@ -636,7 +670,7 @@ CatEnd:
 ;Will ignore extensions with index 0, will add up RC count for subsequent extensions.
 ReadCatalog2:	
 	ld hl, FileMask
-	ld a, (DRIVE)
+	ld a, (DRIVE_SELECTED)
 	ld b, a							;drive
 	ld c, NAMELEN					;name len	
 	call CreateChannel
@@ -651,6 +685,9 @@ CatNext2:
 	inc a
 	jr z, CatEnd2			;return if A=FFh	
 	dec a								
+	
+	ld hl, FreeCatalog
+	dec (hl)
 		
 	push ix
 		ld bc, CH_DMA
@@ -664,7 +701,7 @@ CatNext2:
 		rla
 		ld b, 0			
 		ld c, a
-		add ix, bc						;hl=file name -1=FCB			
+		add ix, bc						;hl=file name -1=FCB				
 														
 		;now ignore entries with index 0, as these are already processed	
 		ld  a, (ix + FCB_EX_IDX)
@@ -747,8 +784,19 @@ DisplayStats:
 	ld h, 0
 	ld l, a
 	ld de, FileCntMsg
-	call N2ASCII3	
-		
+	call N2ASCII3			
+	
+	ld  a, (DRIVE_SELECTED)		
+	add 'A'-1
+	ld  (MsgDrive), a		
+	
+	ld a, (FreeCatalog)	
+	ld l, a	
+	ld h, 0	
+	ld de, UsedCatMsg
+	call N2ASCII3			
+
+PrintStats:			
 	ld	a, 0
 	call ROM_OPEN_SCR
 	ld hl, FreeSpaceMsg
@@ -826,74 +874,83 @@ DivNrLoop:
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Allocated Data ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-FreeSpaceMsg:									
-				DEFB    19, 1			;bright 1										
-				DEFB	17, CLR_RO_SYS
+FreeSpaceMsg:	
+				DEFB	CLR_CODE_INVERSE, 1
+				DEFB	CLR_CODE_BRIGHT, 1
+				DEFB	CLR_CODE_PAPER, CLR_BLUE
+				DEFB	CLR_CODE_INK, CLR_YELLOW
 				DEFB	"Page"
 ScrPageMsg		DEFB	"1/"
 ScrPageMsgMax	DEFB	"1"
-				DEFB	17, CLR_NAME, "Name"
-				DEFB	17, CLR_LEN, "Len B"
-				DEFB    17, CLR_RO, "+R/O"								
-				DEFB 	17, CLR_SYS, "+SYS"
-				DEFB 	17, CLR_RO_SYS, "+R/O+SYS"				
-			
-				
-				DEFB	20, 1			;inverse 1				
-UsedSpaceAsc	DEFM	"    KB in "
-FileCntMsg		DEFM    "    files, "
-FreeSpaceAsc	DEFB	"    KB free"
-				DEFB	20, 0			;inverse 0							
+				DEFB	CLR_CODE_INK, CLR_NAME, "Name"
+				DEFB	CLR_CODE_INK, CLR_LEN, "Len B"
+				DEFB    CLR_CODE_INK, CLR_RO, "+R/O"								
+				DEFB 	CLR_CODE_INK, CLR_SYS, "+SYS"
+				DEFB 	CLR_CODE_INK, CLR_RO_SYS, "+R/O+SYS"				
+											
+				DEFB	CLR_CODE_INK, CLR_CYAN
+MsgDrive		DEFB	"A: "
+				DEFB	CLR_CODE_INK, CLR_RED
+UsedSpaceAsc	DEFM	"   KB/"				
+FileCntMsg		DEFM    "    files,"
+				DEFB	CLR_CODE_INK, CLR_GREEN
+FreeSpaceAsc	DEFM	"   KB/"
+UsedCatMsg		DEFM 	"    dir"				
 FreeSpaceMsgEnd:
 
 
 
 DisplayedLine:
-				DEFB	23						;tab
+				DEFB	CLR_CODE_TAB						;tab
 TabChar			DEFB	0, 0
-				DEFB	16, CLR_BLACK			;ink 0
-				DEFM	19
+				DEFB	CLR_CODE_PAPER, CLR_BLUE
+				DEFM	CLR_CODE_BRIGHT
 DisplayedBright	DEFB	0				;bright is alternating
-				DEFB	17				;paper
+				DEFB	CLR_CODE_INK
 FileNameClr		DEFB	CLR_NAME
 FileName		DEFM	"???????????"
-				DEFB	17, CLR_LEN
-FileLen			DEFB	"     "								
+				DEFB	CLR_CODE_INK, CLR_LEN
+FileLen			DEFB	"     "
 DisplayedLineEnd:
 
 ;the search mask
 FileMask		DEFM	"???????????"
-DRIVE			DEFB	0		;0=A:, 1=B: for BDOS, 0 = use current drive for BASIC; can be poked with the desired drive, it's the last byte in block
+DRIVE_SELECTED	DEFB	DRIVE_A		;0=A:, 1=B: for BDOS, 0 = use current drive for BASIC; can be poked with the desired drive, it's the last byte in block
 END
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Unalocated Variables ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-FileCnt			EQU		DRIVE + 1		;file index for display
+FileCnt			EQU		DRIVE_SELECTED + 1		;file index for display
 UsedKB			EQU		FileCnt + 1
-Cache			EQU		UsedKB + 2		;here goes the cache table
+FreeCatalog		EQU		UsedKB + 2
+Cache			EQU		FreeCatalog + 1				;here goes the cache table
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Constants ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 START_ADDR		EQU	$8000		;Start address
 
 ;System variables for disk
-DSTR1			EQU	$5CD6		;drive
-FSTR1			EQU	$5CDC		;file name
-NSTR1			EQU	$5CDA		;name length
-HD11			EQU	$5CED		;BDOS argument
-COPIES			EQU	$5CEF		;BDOS function
+VAR_DSTR1		EQU	$5CD6		;drive
+VAR_FSTR1		EQU	$5CDC		;file name
+VAR_NSTR1		EQU	$5CDA		;name length
+VAR_HD11		EQU	$5CED		;BDOS argument
+VAR_COPIES		EQU	$5CEF		;BDOS function
+VAR_IOBORD		EQU	23750		;IO border
+
+VAR_SCROLL		EQU	23692
+VAR_SCROLL2		EQU	23659
+VAR_BORDER		EQU	$5C47
+VAR_ERRSP		EQU $5C3D
+VAR_ERRNR		EQU $5C3A
+
+DRIVE_CURRENT	EQU 0
+DRIVE_A			EQU	1
+DRIVE_B			EQU	2
 
 ;File name stuff
 NAMELEN			EQU	11			;name length
 ATTR_RO_POS		EQU	8			;read-only attribute position in name
 ATTR_SYS_POS	EQU	9			;system attribute position in name
-
-;File types (first byte in header)
-PROG_TYPE		EQU	0			;program
-NUMB_TYPE		EQU	1			;number array
-CHAR_TYPE		EQU	2			;char array
-BYTE_TYPE		EQU	3			;bytes
-TEXT_TYPE		EQU	4			;text
 
 ;Disk geometry stuff
 SPT				EQU	16			;sectors per track
@@ -963,6 +1020,12 @@ ROM_OPEN_SCR	EQU	$1601
 ROM_OPEN_SCR_CLR	EQU	$0DAF
 ROM_PRINT		EQU $203C		;DE = string, BC = len
 
+CLR_CODE_INK	EQU 16
+CLR_CODE_PAPER	EQU 17
+CLR_CODE_BRIGHT EQU	19
+CLR_CODE_INVERSE EQU	20
+CLR_CODE_TAB	EQU 23
+
 CLR_BLACK		EQU	0
 CLR_BLUE		EQU	1
 CLR_RED			EQU	2
@@ -972,14 +1035,11 @@ CLR_CYAN		EQU	5
 CLR_YELLOW		EQU	6
 CLR_WHITE		EQU	7
 
-CLR_NAME		EQU CLR_GREEN
+CLR_NAME		EQU CLR_CYAN
 CLR_RO			EQU	CLR_RED
 CLR_SYS			EQU	CLR_MAGENTA
-CLR_RO_SYS		EQU	CLR_YELLOW
-CLR_LEN			EQU	CLR_CYAN
-
-VAR_SCROLL		EQU	23692
-VAR_SCROLL2		EQU	23659
+CLR_RO_SYS		EQU	CLR_GREEN
+CLR_LEN			EQU	CLR_YELLOW
 
 ;key codes
 KEY_ESC			EQU	7
@@ -994,5 +1054,5 @@ MAX_FILES_SCR	EQU	44
 
 
 				EMPTYTAP "cat.tap"
-				savetap "cat.tap", CODE, "hccat", start, END-start
+				savetap "cat.tap", CODE, "run", start, END-start
 ;				savebin "cat.bin", start, END-start				
