@@ -13,6 +13,7 @@
 ;Mathematical operations like multiplication and division are performed using bit shifts, since involve numbers that are power of 2. Again this is for having simple and small code.
 ;Printing the text uses the BASIC ROM routine, that supports embedded color codes. The IF1 print routine doesn't support that. Direct screen output would be another way, but requires more code. Graphical output (64 columns) was excluded for the same reason.
 ;ROM printing routing has an issue with line 21 (out of 0-23), so a trick is used to avoid scrolling: channel 0 is used for the stats printing, then lines 0-21 are printed on channel 2, also poking a variable to prevent scrolling.
+;The disk drive being displayed is the current drive, so the program should work as expected when executed from drive B:, as it doesn't hard code A:. A: is assumed when there's no current drive (like when loading from tape).
 ;What was used to develop this program: 
 ; - SjASMPlus v1.18.2 cross-assembler
 ; - Crimson Editor for editing, launching assembler, deploying in emulator
@@ -40,8 +41,16 @@
 	ORG START_ADDR
 	
 start:
-	;Init IF1, disk, variables
+	;install error handler
+	ld		hl, (VAR_ERRSP)
+	push	hl
+	ld		hl, ErrorHandler
+	push	hl
+	ld		(VAR_ERRSP), sp	
+
+	;Init IF1, disk
 	call Init	
+
 ReadDiskAgain:	
 	;First read of catalog, to get file list	
 	call ReadCatalog1				
@@ -51,6 +60,13 @@ ReadDiskAgain:
 	call GetDiskUsedSpace	
 	;Display list of files	
 	call DisplayFiles	
+	
+	call ReadCharLoop
+	
+	;restore default error handler
+	pop		hl
+	pop		hl
+	ld		(VAR_ERRSP), hl
 
 	ret
 
@@ -77,6 +93,12 @@ PrintStr:
 	djnz PrintStr
 	ret
 	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+SetFastKeys:
+	ld		hl, VAR_REPDEL
+	ld		de, (1 << 8) | 15
+	ld		(hl), de
+	ret	
 	
 ;Compare string at HL with the one at DE, max length B
 ;IN: HL, DE = addr. of strings to compare, B = max. length of strings to compare
@@ -102,31 +124,124 @@ Init:
 ;These 2 calls are not needed when this program is launched from disk, as it will display the current disk.
 ;If loaded from tape, it won't work without the 2 calls, since they are needed for DOS initialisation and selecting A: or B:.	
 	call InitVars	
+	call InitDos
 	
 	;Select the current drive to work with instead of hardcoding A:.
 	call GetCurrentDrive	
-	cp $FF							;$FF = no current drive, forca A:
+	cp $FF							;$FF = no current drive, force A:
 	jr  z, CurrentDriveNone		
 	inc  a							;translate CP/M drive to BASIC drive: 0 -> 1, 1 -> 2
 	jr  SelectDriveInit
 CurrentDriveNone:	
 	ld  a, DRIVE_A
 SelectDriveInit:	
-	call SelectDrive
-
-	xor a
-	ld l, a
-	ld h, a
-	ld (UsedKB), hl					;reset used blocks		
-	ld (FileCnt), a					;reset file counter					
-	ld  a, MAX_DIR_ENT
-	ld (FreeCatalog), a
+	call SelectDrive	
 	
+	;set border and paper to blue
+	ld  a, CLR_BLUE
+	out ($FE), a
+	ld a, (CLR_BLUE << 3) | CLR_WHITE
+	ld (VAR_BORDCR), a
+	ld (VAR_ATTR), a
+			
 	;CLS
 	ld  a, 2
 	call ROM_OPEN_SCR_CLR		
 	
+	ld  a, 0
+	call ROM_OPEN_SCR
+	ld  hl, MsgIntro
+	ld  b, MsgIntroEnd - MsgIntro
+	call PrintStr
+	
+	call SetFastKeys
+		
 	ret
+	
+	
+ErrorHandler:
+	pop		hl
+	ld		(VAR_ERRSP), hl
+	
+	ld		a, 2
+	call	ROM_OPEN_SCR_CLR
+	
+	ld		a, 0
+	call	ROM_OPEN_SCR
+	
+	ld		a, (VAR_ERRNR)
+	push	af
+	ld		l, a
+	ld		h, 0
+	ld		de, MsgErrCode
+	call	N2ASCII3		
+
+	ld		hl, MsgError
+	ld		b, MsgErrorEnd - MsgError
+	call	PrintStr
+		
+	pop		af	
+	push	af
+	call	GetErrMsg		
+	ld		hl, Cache		
+	call	PrintStr			
+	
+	;On disk error, select A:, in case drive B: was empty when selected.
+	pop		af
+	cp		$10
+	jr		nz, DontSelectA
+	ld		a, DRIVE_A
+	call	SelectDrive
+
+DontSelectA:				
+	call	ReadChar	
+	jp		start
+	
+	
+;IN DE = message destination
+GetErrMsg:
+	inc		a
+	ex		af, af'
+
+	ld		hl, IF1Paged			;page-in IF1
+	ld		(VAR_HD11), hl
+	rst		8
+	defb	50
+	ret								;return after accesing IF1
+
+IF1Paged:
+	ld		hl, ERRMSG
+	ex		af, af'
+	or		a
+	jr		z, SaveMsg
+
+	ld		b, 0
+SearchMsgEnd:
+	bit		7, (hl)
+	inc		hl
+	jr		z, SearchMsgEnd
+
+	inc		b
+	cp		b
+	jr		nz, SearchMsgEnd
+
+SaveMsg:	
+	ld		de, Cache
+	ld		b, 0
+CopyMsg:
+	ld		a, (hl)	
+	ld		(de), a
+	inc		hl
+	inc		de
+	inc		b
+	bit		7, a
+	jr		z, CopyMsg
+	ex		de, hl
+	dec		hl
+	res		7, (hl)
+	ret			
+	
+	
 	
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Disk routines ;;;;;;;;;;;;;;;;;;;;;;;;;
 	
@@ -215,6 +330,22 @@ SetDMA:
 		call BDOS
 	pop ix
 	ret
+	
+;Load a program from disk
+;IN: HL = file name addr
+LoadProgram:
+	LD   (VAR_FSTR1), HL
+	LD   H, 0
+	LD   L, NAMELEN
+	LD   (VAR_NSTR1), HL
+	;LD	 A, (DRIVE_SELECTED)
+	LD   L, DRIVE_CURRENT
+	LD   (VAR_DSTR1), HL
+	LD   HL, LOAD_ADDR
+	LD   (VAR_HD11), HL
+	RST  8
+	DEFB 50
+	RET	
 	
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;				
@@ -354,30 +485,69 @@ ScreenCntLoop:
 DisplayFilesLoop:	
 	xor a
 	ld (TabChar), a
-			
-	ld (DisplayedBright), a
 	
 	call GetFileListForScreen
+	ld  a, b
+	ld  (FileCntScr), a
 	call DisplayOneScreen
+	ret
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+	
 ReadCharLoop:
 	call ReadChar	
-	cp  KEY_ESC
+	cp  KEY_ESC	
 	ret z
-	cp  KEY_DOWN
-	jr  z, NextScr
-	cp  KEY_UP
-	jr  z, PrevScr
-	cp  KEY_RIGHT
-	jr  z, NextScr
-	cp  KEY_LEFT
-	jr  z, PrevScr
+	
 	cp  '1'
 	jr  z, SelectDriveA
 	cp  '2'
 	jr  z, SelectDriveB
+	
+	cp KEY_DOWN
+	jr nz, CheckKeyUp	
+	call CursorDown
+	jr ReadCharLoop
+
+CheckKeyUp:
+	cp KEY_UP
+	jr nz, CheckKeyRight
+	call CursorUp
+	jr ReadCharLoop
+	
+CheckKeyRight:	
+	cp KEY_RIGHT
+	jr nz, CheckKeyLeft
+	call CursorRight
+	jr ReadCharLoop
+	
+CheckKeyLeft:	
+	cp KEY_LEFT
+	jr  nz, CheckEnter
+	call CursorLeft	
 	jr  ReadCharLoop
-		
+	
+CheckEnter:
+	cp KEY_ENTER
+	jr nz, ReadCharLoop			
+	
+	;Read current screen.
+	ld a, (ScrPageMsg)	
+	sub '1'
+	or  a
+	jr  z, FirstPageIndex
+	ld  b, a			
+	xor a
+PageAddLoop:	
+	add MAX_FILES_SCR	
+	djnz PageAddLoop
+FirstPageIndex:			
+	ld hl, SelFileIdxScr
+	add (hl)
+	ld  b, a
+	call FindCacheByIndex
+	call LoadProgram
+	jr ReadCharLoop
 	
 SelectDriveA:
 	ld  a, DRIVE_A
@@ -387,25 +557,126 @@ SelectDriveB:
 SwitchDrive:		
 	call SelectDrive
 	pop  hl							;restore stack for this call
-	jp   start
+	jp   ReadDiskAgain
 
 NextScr:
 	ld hl, ScrPageMsg
 	ld a, (ScrPageMsgMax)
-	inc (hl)	
 	cp (hl)
-	jr  nc,DisplayFilesLoop 	
-	ld (hl), a
-	jr  ReadCharLoop 	
+	ret z
+	inc (hl)	
+	jp DisplayFilesLoop	
 	
 PrevScr:	
 	ld hl, ScrPageMsg	
 	ld  a, '1'
 	cp (hl)
-	jr  z, ReadCharLoop 	
+	ret z
 	dec (hl)	
-	jr  DisplayFilesLoop 	
+	jp DisplayFilesLoop	
 	
+	
+CursorDownOrRight:		
+	ld a, (FileCntScr)
+	ld b, a			
+	ld a, (SelFileIdxScr)
+	add c
+	cp b		
+	jr c, CursorDownValidSelection
+	
+	;Cursor moved outside screen, check if we need to move to next screen.
+	ld  a, MAX_FILES_SCR
+	cp  b
+	jr  z, NextScr
+	ret
+	
+CursorDownValidSelection:	
+	;The selection is within the file list, draw it.
+	ld (SelFileIdxScr), a
+	push bc
+	push af
+		call DrawCursor
+	pop af
+	pop bc
+	sub c
+	call DrawCursor
+	ret
+	
+	
+CursorDown:	
+	ld  c, 2
+	jr  CursorDownOrRight
+	
+CursorRight:
+	ld  c, 1
+	jr  CursorDownOrRight
+	
+CursorUp:
+	ld c, 2
+	jr CursorUpOrLeft
+	
+CursorLeft:
+	ld c, 1
+	jr CursorUpOrLeft	
+
+CursorUpOrLeft:
+	ld a, (SelFileIdxScr)
+	cp c
+	jr c, PrevScr
+
+	push bc	
+	push af
+		call DrawCursor
+	pop af
+	pop bc
+	sub c
+	ld (SelFileIdxScr), a
+	call DrawCursor	
+	ret
+		
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;IN A = file index to highlite (0 - 43)
+DrawCursor:
+	ld c, a
+	ld b, 0
+	;*16
+	sla c
+	rl b
+	sla c
+	rl b
+	sla c
+	rl b
+	sla c
+	rl b
+	
+	ld hl, SCR_ATTR_ADDR
+	add hl, bc
+	
+	ld b, SCR_COLUMNS/2
+DrawCursorLoop:	
+	ld a, (hl)
+	;draw inverse	
+	and %111
+	ld  c, a	
+	rl c
+	rl c
+	rl c
+	ld a, (hl)
+	and %111000
+	rra
+	rra
+	rra
+	or c
+	ld  c, a
+	ld a, (hl)
+	;keep bright, flash
+	and %11000000
+	or c
+	ld (hl), a
+	inc hl
+	djnz DrawCursorLoop
+	
+	ret	
 	
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
 ;Determine the cache line to start with (in HL) and how many files to show (in B)
@@ -463,35 +734,49 @@ Page3of3:
 	ld  c, a					;get rest of files for page 2
 	
 FindCacheLine:	
+	call FindCacheByIndex
+	
+	ld  b, c		
+	ret	
+	
+;IN B=cache index to put in HL	
+FindCacheByIndex:
 	ld	de, CACHE_LN_SZ	
 	ld 	hl, Cache	
 	ld  a, b
 	or  a
-	jr  z, ListReady	
+	ret z
 FindCacheLineLoop:	
 	add	hl, de
-	djnz FindCacheLineLoop	
-	
-ListReady:	
-	ld  b, c
-		
-	ret	
+	djnz FindCacheLineLoop		
 	
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
 ;Shows file lists for one screen, with cache from HL and file count from B
-DisplayOneScreen:					
+DisplayOneScreen:							
 	push	bc		
 	push	hl
 		ld  a, 2
 		call ROM_OPEN_SCR_CLR		
 		;Display occupied space, file number, free space, page
-		call DisplayStats					
+		call DisplayStats						
 	pop		hl
 	pop		bc
 	
 	push 	bc
 	push 	hl			
+		;prevent scroll up, to be able to display on row 21
+		xor a	
+		ld  (VAR_SCROLL2), a
+	
 		call DisplayFilesInfo								
+		
+		;restore scroll, to prevent crash
+		ld  hl, VAR_SCROLL2
+		ld  (hl), 2
+		
+		xor a
+		ld (SelFileIdxScr), a
+		call DrawCursor
 	pop	 hl
 	pop  bc	
 	
@@ -504,10 +789,7 @@ DisplayFilesInfo:
 	push hl
 	ld  a, 2
 	call ROM_OPEN_SCR
-	pop	hl
-	;prevent scroll up, to be able to display on row 21
-	xor a	
-	ld  (VAR_SCROLL2), a
+	pop	hl	
 	
 	;return if 0 files on disk
 	ld a, b
@@ -551,7 +833,7 @@ GoodChar:
 		
 		;set tab every 2 entries
 		ld a, (TabChar)
-		xor 16		
+		xor SCR_COLUMNS/2		
 		ld (TabChar), a				
 	pop hl
 	ld  bc, CACHE_LN_SZ
@@ -564,10 +846,7 @@ GoodChar:
 	srl a	
 	ld (DisplayedBright), a	
 	djnz DisplayLoop
-	
-	;restore scroll, to prevent crash
-	ld  hl, VAR_SCROLL2
-	ld  (hl), 2
+		
 	ret	
 
 
@@ -600,6 +879,14 @@ NotSys:
 
 ;Read directory and create a table (name - 11B, RC count - 2B)
 ReadCatalog1:	
+	xor a
+	ld l, a
+	ld h, a
+	ld (UsedKB), hl					;reset used blocks		
+	ld (FileCnt), a					;reset file counter							
+	ld  a, MAX_DIR_ENT
+	ld (FreeCatalog), a
+
 	ld hl, FileMask
 	ld a, (DRIVE_SELECTED)
 	ld b, a							;drive
@@ -712,7 +999,7 @@ CatNext2:
 		push ix
 		pop  hl
 		inc  hl
-		call FindCache
+		call FindCacheByName
 		
 		ex  de, hl
 		ld  bc, NAMELEN
@@ -745,7 +1032,7 @@ CatEnd2:
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;		
 ;IN HL = name address
 ;OUT DE = file row in cache
-FindCache:
+FindCacheByName:
 	ld  de, Cache	
 	
 FindCacheLoop:	
@@ -803,7 +1090,6 @@ PrintStats:
 	ld b, FreeSpaceMsgEnd - FreeSpaceMsg	
 	call PrintStr
 	ret
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Number routines ;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -899,7 +1185,6 @@ UsedCatMsg		DEFM 	"    dir"
 FreeSpaceMsgEnd:
 
 
-
 DisplayedLine:
 				DEFB	CLR_CODE_TAB						;tab
 TabChar			DEFB	0, 0
@@ -913,9 +1198,19 @@ FileName		DEFM	"???????????"
 FileLen			DEFB	"     "
 DisplayedLineEnd:
 
+MsgError		DEFB	CLR_CODE_PAPER, CLR_RED, CLR_CODE_BRIGHT, 1
+				DEFM	"Error "
+MsgErrCode		DEFM	"   : "
+MsgErrorEnd
+
+MsgIntro		DEFM	CLR_CODE_INVERSE, 1, CLR_CODE_INK, CLR_RED
+				DEFM	"Cursor+CR=Run;1/2=A:/B:;ESC=Exit"
+				DEFM	127, "2022 george.chirtoaca@gmail.com"
+MsgIntroEnd:
+
 ;the search mask
 FileMask		DEFM	"???????????"
-DRIVE_SELECTED	DEFB	DRIVE_A		;0=A:, 1=B: for BDOS, 0 = use current drive for BASIC; can be poked with the desired drive, it's the last byte in block
+DRIVE_SELECTED	DEFB	DRIVE_CURRENT		;0=A:, 1=B: for BDOS, 0 = use current drive for BASIC; can be poked with the desired drive, it's the last byte in block
 END
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Unalocated Variables ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -923,7 +1218,9 @@ END
 FileCnt			EQU		DRIVE_SELECTED + 1		;file index for display
 UsedKB			EQU		FileCnt + 1
 FreeCatalog		EQU		UsedKB + 2
-Cache			EQU		FreeCatalog + 1				;here goes the cache table
+SelFileIdxScr	EQU		FreeCatalog + 1
+FileCntScr		EQU		SelFileIdxScr + 1
+Cache			EQU		FileCntScr + 1				;here goes the cache table
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Constants ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -936,12 +1233,19 @@ VAR_NSTR1		EQU	$5CDA		;name length
 VAR_HD11		EQU	$5CED		;BDOS argument
 VAR_COPIES		EQU	$5CEF		;BDOS function
 VAR_IOBORD		EQU	23750		;IO border
+VAR_ATTR		EQU 23693		;color attribute
+VAR_BORDCR		EQU 23624
 
 VAR_SCROLL		EQU	23692
 VAR_SCROLL2		EQU	23659
 VAR_BORDER		EQU	$5C47
 VAR_ERRSP		EQU $5C3D
 VAR_ERRNR		EQU $5C3A
+VAR_REPDEL		EQU	23561
+
+;IF1
+LOAD_ADDR		EQU	2625		;address of the load procedure in IF1 ROM
+ERRMSG			EQU	$0260
 
 DRIVE_CURRENT	EQU 0
 DRIVE_A			EQU	1
@@ -1040,6 +1344,11 @@ CLR_RO			EQU	CLR_RED
 CLR_SYS			EQU	CLR_MAGENTA
 CLR_RO_SYS		EQU	CLR_GREEN
 CLR_LEN			EQU	CLR_YELLOW
+
+SCR_ATTR_ADDR	EQU 22528
+SCR_ATTR_LEN	EQU	768
+SCR_COLUMNS		EQU	32
+SCR_LINES		EQU 24
 
 ;key codes
 KEY_ESC			EQU	7
