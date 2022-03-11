@@ -530,7 +530,7 @@ CheckKeyLeft:
 CheckEnter:
 	cp KEY_ENTER
 	jr nz, ReadCharLoop			
-	
+		
 	;Read current screen.
 	ld a, (ScrPageMsg)	
 	sub '1'
@@ -547,6 +547,7 @@ FirstPageIndex:
 	ld  b, a
 	call FindCacheByIndex
 	call LoadProgram
+	;Control is now given to the program being executed.
 	jr ReadCharLoop
 	
 SelectDriveA:
@@ -749,6 +750,7 @@ FindCacheByIndex:
 FindCacheLineLoop:	
 	add	hl, de
 	djnz FindCacheLineLoop		
+	ret
 	
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
 ;Shows file lists for one screen, with cache from HL and file count from B
@@ -795,6 +797,7 @@ DisplayFilesInfo:
 	ld a, b
 	or a
 	ret z
+	
 DisplayLoop:	
 	push bc		
 	push hl	
@@ -817,7 +820,7 @@ DisplayLoop:
 		ld  hl, FileName
 FileNameCopy:			
 		ld  a, (hl)		
-		and $7F									;clear bit 7; LOAD accepts bit 7 set or not (char SCREEN$ or *)
+		and $7F									;clear bit 7; LOAD accepts bit 7 set or not set (char SCREEN$ or *)
 		cp  ' '
 		jr  nc, GoodChar
 		ld  a, '?'				
@@ -843,7 +846,7 @@ GoodChar:
 	;set alternating bright every 2 entries
 	ld a, b
 	and 2
-	srl a	
+	sra a	
 	ld (DisplayedBright), a	
 	djnz DisplayLoop
 		
@@ -1164,12 +1167,11 @@ FreeSpaceMsg:
 				DEFB	CLR_CODE_INVERSE, 1
 				DEFB	CLR_CODE_BRIGHT, 1
 				DEFB	CLR_CODE_PAPER, CLR_BLUE
-				DEFB	CLR_CODE_INK, CLR_YELLOW
-				DEFB	"Page"
+				DEFB	CLR_CODE_INK, CLR_YELLOW				
 ScrPageMsg		DEFB	"1/"
 ScrPageMsgMax	DEFB	"1"
-				DEFB	CLR_CODE_INK, CLR_NAME, "Name"
-				DEFB	CLR_CODE_INK, CLR_LEN, "Len B"
+				DEFB	CLR_CODE_INK, CLR_NAME, "FILENAME"
+				DEFB	CLR_CODE_INK, CLR_LEN, "LEN B"
 				DEFB    CLR_CODE_INK, CLR_RO, "+R/O"								
 				DEFB 	CLR_CODE_INK, CLR_SYS, "+SYS"
 				DEFB 	CLR_CODE_INK, CLR_RO_SYS, "+R/O+SYS"				
@@ -1177,11 +1179,11 @@ ScrPageMsgMax	DEFB	"1"
 				DEFB	CLR_CODE_INK, CLR_CYAN
 MsgDrive		DEFB	"A: "
 				DEFB	CLR_CODE_INK, CLR_RED
-UsedSpaceAsc	DEFM	"   KB/"				
-FileCntMsg		DEFM    "    files,"
+UsedSpaceAsc	DEFM	"   KB"				
+FileCntMsg		DEFM    "   FILES"
 				DEFB	CLR_CODE_INK, CLR_GREEN
-FreeSpaceAsc	DEFM	"   KB/"
-UsedCatMsg		DEFM 	"    dir"				
+FreeSpaceAsc	DEFM	"   KB"
+UsedCatMsg		DEFM 	"   DIR FREE"				
 FreeSpaceMsgEnd:
 
 
@@ -1203,18 +1205,18 @@ MsgError		DEFB	CLR_CODE_PAPER, CLR_RED, CLR_CODE_BRIGHT, 1
 MsgErrCode		DEFM	"   : "
 MsgErrorEnd
 
-MsgIntro		DEFM	CLR_CODE_INVERSE, 1, CLR_CODE_INK, CLR_RED
-				DEFM	"Cursor+CR=Run;1/2=A:/B:;ESC=Exit"
-				DEFM	127, "2022 george.chirtoaca@gmail.com"
+MsgIntro		DEFM	CLR_CODE_BRIGHT, 1 ,CLR_CODE_INK, CLR_WHITE, CLR_CODE_PAPER, CLR_RED
+				DEFM	"CURSOR+CR=RUN;1/2=A:/B:;ESC=EXIT"
+				DEFM	127, "2022 GEORGE.CHIRTOACA@GMAIL.COM"
 MsgIntroEnd:
 
 ;the search mask
 FileMask		DEFM	"???????????"
-DRIVE_SELECTED	DEFB	DRIVE_CURRENT		;0=A:, 1=B: for BDOS, 0 = use current drive for BASIC; can be poked with the desired drive, it's the last byte in block
 END
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Unalocated Variables ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+DRIVE_SELECTED	EQU		FileMask + NAMELEN
 FileCnt			EQU		DRIVE_SELECTED + 1		;file index for display
 UsedKB			EQU		FileCnt + 1
 FreeCatalog		EQU		UsedKB + 2
