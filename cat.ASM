@@ -339,14 +339,14 @@ LoadProgram:
 	LD   L, NAMELEN
 	LD   (VAR_NSTR1), HL
 	;LD	 A, (DRIVE_SELECTED)
-	LD   L, DRIVE_CURRENT
+	LD   L, DRIVE_CURRENT			;load from current drive
 	LD   (VAR_DSTR1), HL
 	LD   HL, LOAD_ADDR
 	LD   (VAR_HD11), HL
 	RST  8
-	DEFB 50
-	RET	
-	
+	DEFB 50	
+	ret								;ret to BASIC in case the program exits
+	;Control is now given to the program being executed.
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;				
 	
@@ -531,7 +531,7 @@ CheckEnter:
 	cp KEY_ENTER
 	jr nz, ReadCharLoop			
 		
-	;Read current screen.
+	;Read current screen number.
 	ld a, (ScrPageMsg)	
 	sub '1'
 	or  a
@@ -546,9 +546,19 @@ FirstPageIndex:
 	add (hl)
 	ld  b, a
 	call FindCacheByIndex
-	call LoadProgram
-	;Control is now given to the program being executed.
-	jr ReadCharLoop
+	
+	pop de							;restore stack for this call
+	;restore default error handler, if a game throws an error, the error handler might be overwritten already.
+	/*
+	ex  de, hl		
+	pop		hl
+	pop		hl
+	ld		(VAR_ERRSP), hl
+	ex  de, hl
+	*/
+	
+	;Control is now given to the program being executed.	
+	jp LoadProgram		
 	
 SelectDriveA:
 	ld  a, DRIVE_A
@@ -769,6 +779,8 @@ DisplayOneScreen:
 		;prevent scroll up, to be able to display on row 21
 		xor a	
 		ld  (VAR_SCROLL2), a
+		
+		ld (DisplayedBright), a
 	
 		call DisplayFilesInfo								
 		
@@ -798,6 +810,8 @@ DisplayFilesInfo:
 	or a
 	ret z
 	
+	;Use C as file index, for alternating brightness.
+	ld  c, 1
 DisplayLoop:	
 	push bc		
 	push hl	
@@ -844,10 +858,11 @@ GoodChar:
 	pop bc		
 	
 	;set alternating bright every 2 entries
-	ld a, b
+	ld  a, c	
 	and 2
-	sra a	
+	rra
 	ld (DisplayedBright), a	
+	inc c
 	djnz DisplayLoop
 		
 	ret	
@@ -1226,7 +1241,7 @@ Cache			EQU		FileCntScr + 1				;here goes the cache table
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Constants ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-START_ADDR		EQU	$8000		;Start address
+START_ADDR		EQU	32768		;Start address
 
 ;System variables for disk
 VAR_DSTR1		EQU	$5CD6		;drive
@@ -1366,4 +1381,4 @@ MAX_FILES_SCR	EQU	44
 
 				EMPTYTAP "cat.tap"
 				savetap "cat.tap", CODE, "run", start, END-start
-;				savebin "cat.bin", start, END-start				
+				savebin "cat.bin", start, END-start				
