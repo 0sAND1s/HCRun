@@ -2,7 +2,7 @@
 ;George Chirtoaca, george.chirtoaca(@)gmail(.)com, April 2023
 
 				DEVICE ZXSPECTRUM48
-
+	DEFINE _REAL_HW_
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Main program ;;;;;;;;;;;;;;;;;;;;;;;;;;								
 	ORG START_ADDR
 	
@@ -878,11 +878,11 @@ ReadCatalog1:
 ReadCatalog1Loop:			
 	push hl
 	pop  ix
-	
-	;Check if deleted file
-	ld	a, (ix + EXT_DEL_FLAG)
-	cp	DEL_FLAG
-	jr  z, SkipDirEntry
+		
+	;Skip dir entries with non-0 user code, same as ROM.
+	ld	a, (ix + EXT_DEL_FLAG)			
+	or  a
+	jr  nz, SkipDirEntry
 	
 	;Check if first dir entry for file
 	ld	a, (ix + EXT_IDX)
@@ -945,11 +945,11 @@ ReadCatalog2:
 ReadCatalog2Loop:			
 	push hl
 	pop  ix
-	
-	;Check if deleted file
-	ld	a, (ix + EXT_DEL_FLAG)
-	cp	DEL_FLAG
-	jr  z, SkipDirEntry2
+		
+	;Skip dir entries with non-0 user code, same as ROM.
+	ld	a, (ix + EXT_DEL_FLAG)		
+	or  a
+	jr  nz, SkipDirEntry2
 	
 	;Check if NOT first dir entry for file
 	ld	a, (ix + EXT_IDX)
@@ -1142,12 +1142,26 @@ RWTSTrack		DEFB	0
 RWTSSector		DEFB	0
 RWTSDMA			DEFW	0
 RWTSExtBuf		DEFW	$2932
-RWTSPrmTbl		DEFW	$1f2a
+	IFDEF _REAL_HW_
+RWTSPrmTbl		DEFW	BasPrmTbl			;$1f2a
+	ELSE
+RWTSPrmTbl		DEFW	$1f2a	
+	ENDIF
 RWTSCmd			DEFB	RWTS_CMD_READ
 ;RWTS Results
 RWTSRes			DEFB	0
 RWTSResVolNo	DEFB	0
 RWTSResTmp		DEFB	0, 0, 0, 0, 0
+
+	IFDEF _REAL_HW_
+BasPrmTbl:
+PrmDevType		DEFB	$01		;$01
+PrmStepRate		DEFB	$01		;$0D	(milisec)
+PrmHeadLoad		DEFB	$01		;$23	(milisec)
+PrmSpinUp		DEFB	$01		;$64	(1/100 sec)
+PrmIntrlvTbl	DEFW	InterleaveTbl
+InterleaveTbl   DEFB	1, 3, 5, 7, 9, 11, 13, 15, 2, 4, 6, 8, 10, 12, 14, 16
+	ENDIF
 
 FreeSpaceMsg:	
 				DEFB	CLR_CODE_INVERSE, 1
