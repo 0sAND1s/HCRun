@@ -1,6 +1,9 @@
 File browser/disk autorun program for ICE Felix HC computers
 George Chirtoaca, george.chirtoaca(@)gmail(.)com, April 2023
 
+![ScreenShot](https://raw.githubusercontent.com/0sAND1s/HCRun/main/RO_SYS_Attributes_DriveB.bmp)
+![ScreenShot](https://raw.githubusercontent.com/0sAND1s/HCRun/main/RegularFiles.bmp)
+
 The purpose of this program is to have a fast file listing, that includes hidden files and also shows the aproximate file size and file attributes using colours on screen.
 File selection is possible with arrow keys, to select BASIC programs and run them, making it usefull as "run" program for auto-run on HC floppy disks. That's why it tries to be small and fast.
 Reading the exact file size and file type requires opening up each file, which is slow, so it's not performed. The aproximate file size provided (rounded at 128 bytes) can be used as a hint to guess the file type.
