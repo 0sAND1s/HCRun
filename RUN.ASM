@@ -103,10 +103,10 @@ CurrentDriveNone:
 SelectDriveInit:	
 	call SelectDrive	
 	
-	;set border and paper to blue
-	ld  a, CLR_BLUE
+	;set border and paper to CLR_BKG
+	ld  a, CLR_BKG
 	out ($FE), a
-	ld a, (CLR_BLUE << 3) | CLR_WHITE
+	ld a, (CLR_BKG << 3) | CLR_WHITE
 	ld (VAR_BORDCR), a
 	ld (VAR_ATTR), a
 			
@@ -1166,8 +1166,8 @@ InterleaveTbl   DEFB	1, 3, 5, 7, 9, 11, 13, 15, 2, 4, 6, 8, 10, 12, 14, 16
 FreeSpaceMsg:	
 				DEFB	CLR_CODE_INVERSE, 1
 				DEFB	CLR_CODE_BRIGHT, 1
-				DEFB	CLR_CODE_PAPER, CLR_BLUE
-				DEFB	CLR_CODE_INK, CLR_YELLOW				
+				DEFB	CLR_CODE_PAPER, CLR_BKG
+				DEFB	CLR_CODE_INK, CLR_LEN
 ScrPageMsg		DEFB	"1/"
 ScrPageMsgMax	DEFB	"1"
 				DEFB	CLR_CODE_INK, CLR_NAME, "FileName"
@@ -1191,7 +1191,7 @@ FreeSpaceMsgEnd:
 DisplayedLine:
 				DEFB	CLR_CODE_TAB						;tab
 TabChar			DEFB	0, 0
-				DEFB	CLR_CODE_PAPER, CLR_BLUE
+				DEFB	CLR_CODE_PAPER, CLR_BKG
 				DEFM	CLR_CODE_BRIGHT
 DisplayedBright	DEFB	0				;bright is alternating
 				DEFB	CLR_CODE_INK
@@ -1322,16 +1322,18 @@ CLR_CYAN		EQU	5
 CLR_YELLOW		EQU	6
 CLR_WHITE		EQU	7
 
-CLR_NAME		EQU CLR_CYAN
+;Color setting for UI elements
+CLR_BKG			EQU	CLR_BLUE
+CLR_NAME		EQU	CLR_GREEN
 CLR_RO			EQU	CLR_RED
 CLR_SYS			EQU	CLR_MAGENTA
 CLR_RO_SYS		EQU	CLR_BLACK
 CLR_LEN			EQU	CLR_YELLOW
 
-SCR_ATTR_ADDR	EQU 22528
-SCR_ATTR_LEN	EQU	768
+SCR_ATTR_ADDR		EQU	22528
+SCR_ATTR_LEN		EQU	768
 SCR_COLUMNS		EQU	32
-SCR_LINES		EQU 24
+SCR_LINES		EQU	24
 
 ;key codes
 KEY_ESC			EQU	7
@@ -1342,7 +1344,7 @@ KEY_UP			EQU	11
 KEY_ENTER		EQU	13
 KEY_CTRL		EQU	14
 
-MAX_FILES_SCR	EQU	44
+MAX_FILES_SCR		EQU	44
 
 
 	;EMPTYTAP "cat.tap"
